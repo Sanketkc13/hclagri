@@ -125,10 +125,15 @@ def main():
             weather_factor = st.selectbox("Select Weather Factor", 
                                         ['rainfall_mm', 'temperature_c'])
         
-        fig = px.scatter(df, x=weather_factor, y='price_₹/ton', 
-                        color='crop_type', trendline="ols",
-                        title=f"Price vs {weather_factor.replace('_', ' ').title()}")
-        st.plotly_chart(fig, use_container_width=True)
+        try:
+            fig = px.scatter(df, x=weather_factor, y='price_₹/ton', 
+                            color='crop_type', trendline="ols",
+                            title=f"Price vs {weather_factor.replace('_', ' ').title()}")
+            st.plotly_chart(fig, use_container_width=True)
+        except ImportError:
+            st.error("Statsmodels required for trendlines. Install with: pip install statsmodels")
+        except Exception as e:
+            st.error(f"Error generating plot: {str(e)}")
 
     with tab4:  # Price Prediction
         st.header("Price Prediction Model")
@@ -167,16 +172,19 @@ def main():
     with tab5:  # Regional Analysis
         st.header("Geographical Price Distribution")
         
-        avg_prices = df.groupby(['state', 'crop_type'])['price_₹/ton'].mean().reset_index()
-        fig = px.choropleth(avg_prices,
-                            locations="state",
-                            locationmode="India",  # Update to your country
-                            color="price_₹/ton",
-                            hover_name="state",
-                            animation_frame="crop_type",
-                            color_continuous_scale=px.colors.sequential.Plasma,
-                            title="Regional Price Variations")
-        st.plotly_chart(fig, use_container_width=True)
+        try:
+            avg_prices = df.groupby(['state', 'crop_type'])['price_₹/ton'].mean().reset_index()
+            fig = px.choropleth(avg_prices,
+                                locations="state",
+                                locationmode="India",
+                                color="price_₹/ton",
+                                hover_name="state",
+                                animation_frame="crop_type",
+                                color_continuous_scale=px.colors.sequential.Plasma,
+                                title="Regional Price Variations")
+            st.plotly_chart(fig, use_container_width=True)
+        except Exception as e:
+            st.error(f"Map rendering error: {str(e)}")
 
     # Report generation
     st.sidebar.header("Report Generation")
