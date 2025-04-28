@@ -16,7 +16,7 @@ def preprocess_data(df, training=True):
         df[col] = le.fit_transform(df[col])
         le_dict[col] = le
 
-    # Scaling the numerical columns
+    # Scaling the numerical columns (if any)
     scaler = StandardScaler()
     numerical_columns = ['Rainfall', 'Temperature']
 
@@ -34,9 +34,6 @@ def preprocess_data(df, training=True):
 def train_model():
     # Load dataset
     df = pd.read_csv('cleaned_dataset.csv')
-
-    # Debugging: Check columns
-    st.write('Columns in your dataset:', df.columns.tolist())  # Show columns to help identify any mismatch
 
     # Define the columns to be selected (adjust according to actual dataset)
     selected_cols = ['State', 'District', 'Crop Type', 'Time', 'Rainfall', 'Temperature', 'Price (₹/ton)']
