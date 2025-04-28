@@ -15,70 +15,69 @@ st.title("Agriculture Price Prediction App")
 # Load your cleaned dataset directly
 @st.cache_data
 def load_data():
-    df = pd.read_csv('cleaned_dataset.csv')  # <-- Here we load directly
+    df = pd.read_csv('cleaned_dataset.csv')
     return df
 
-# Smart fill values (optional for later)
+# Smart fill values 
 def smart_fill_values(crop, month, state, city):
-    smart_data = {}
-    if month in [12, 1, 2]:
-        smart_data['temperature_c'] = 18
-    elif month in [3, 4, 5]:
-        smart_data['temperature_c'] = 32
-    elif month in [6, 7, 8, 9]:
-        smart_data['temperature_c'] = 27
-    else:
-        smart_data['temperature_c'] = 24
+    return {
+        'temperature_c': 18 if month in [12,1,2] else 32 if month in [3,4,5] else 27 if month in [6,7,8,9] else 24,
+        'rainfall_mm': 300 if month in [6,7,8,9] else 50,
+        'supply_volume_tons': 500,
+        'demand_volume_tons': 520,
+        'transportation_cost_₹/ton': 400,
+        'fertilizer_usage_kg/hectare': 110,
+        'pest_infestation_0-1': 0.3,
+        'market_competition_0-1': 0.5,
+        'crop_type': crop,
+        'month': month,
+        'state': state,
+        'city': city
+    }
 
-    if month in [6, 7, 8, 9]: 
-        smart_data['rainfall_mm'] = 300
-    else:
-        smart_data['rainfall_mm'] = 50
-
-    smart_data['supply_volume_tons'] = 500
-    smart_data['demand_volume_tons'] = 520
-    smart_data['transportation_cost_₹/ton'] = 400
-    smart_data['fertilizer_usage_kg/hectare'] = 110
-    smart_data['pest_infestation_0-1'] = 0.3
-    smart_data['market_competition_0-1'] = 0.5
-
-    return smart_data
-
-# Preprocessing
+# Modified preprocessing
 @st.cache_data
-def preprocess_data(df):
-    df = df.dropna()
+def preprocess_data(df, le_dict=None, scaler=None, fit=True):
+    df = df.copy()
+    
+    if fit:
+        le_dict = {}
+        cat_cols = df.select_dtypes(include='object').columns
+        for col in cat_cols:
+            le = LabelEncoder()
+            df[col] = le.fit_transform(df[col])
+            le_dict[col] = le
+        
+        scaler = StandardScaler()
+        df[df.columns] = scaler.fit_transform(df[df.columns])
+        return df, le_dict, scaler
+    else:
+        cat_cols = le_dict.keys()
+        for col in cat_cols:
+            df[col] = le_dict[col].transform(df[col])
+        df[df.columns] = scaler.transform(df[df.columns])
+        return df
 
-    le = LabelEncoder()
-    cat_cols = df.select_dtypes(include='object').columns
-    for col in cat_cols:
-        df[col] = le.fit_transform(df[col])
-
-    scaler = StandardScaler()
-    df[df.columns] = scaler.fit_transform(df[df.columns])
-
-    return df
-
-# Save trained model
-def save_model(model):
+# Save model with preprocessing artifacts
+def save_model(model, le_dict, scaler):
     with open('xgboost_agricultural_price_model.pkl', 'wb') as f:
-        pickle.dump(model, f)
+        pickle.dump({'model': model, 'le_dict': le_dict, 'scaler': scaler}, f)
 
-# Load trained model
+# Load model with preprocessing artifacts
 def load_model():
     with open('xgboost_agricultural_price_model.pkl', 'rb') as f:
-        model = pickle.load(f)
-    return model
+        data = pickle.load(f)
+    return data['model'], data['le_dict'], data['scaler']
 
 # Model training
-def train_model(df):
+def train_model(df, le_dict, scaler):
     X = df.drop(['price_₹/ton'], axis=1)
     y = df['price_₹/ton']
 
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
     model = XGBRegressor(objective='reg:squarederror')
-
+    
     param_grid = {
         'n_estimators': [100, 200],
         'learning_rate': [0.01, 0.1, 0.2],
@@ -91,60 +90,55 @@ def train_model(df):
     grid_search.fit(X_train, y_train)
 
     best_model = grid_search.best_estimator_
-
-    # Save the trained model to a file
-    save_model(best_model)
+    save_model(best_model, le_dict, scaler)
 
     y_pred = best_model.predict(X_test)
-
-    mae = mean_absolute_error(y_test, y_pred)
-    mse = mean_squared_error(y_test, y_pred)
-    r2 = r2_score(y_test, y_pred)
-
-    return best_model, mae, mse, r2
+    return best_model, (
+        mean_absolute_error(y_test, y_pred),
+        mean_squared_error(y_test, y_pred),
+        r2_score(y_test, y_pred)
+    )
 
 # Main app
 df = load_data()
 st.write("### Loaded Cleaned Dataset")
 st.dataframe(df.head())
 
-df_processed = preprocess_data(df)
+# Preprocess data
+df_processed, le_dict, scaler = preprocess_data(df, fit=True)
 
 if st.button('Train Model'):
-    with st.spinner('Training in progress...'):
-        model, mae, mse, r2 = train_model(df_processed)
+    with st.spinner('Training...'):
+        model, (mae, mse, r2) = train_model(df_processed, le_dict, scaler)
+        
+        st.success("Model trained!")
+        st.metric("MAE", f"₹{mae:.2f}")
+        st.metric("MSE", f"₹{mse:.2f}")
+        st.metric("R²", f"{r2:.2f}")
 
-        st.success("Model training completed!")
-        st.write(f"**Mean Absolute Error (MAE):** {mae:.2f}")
-        st.write(f"**Mean Squared Error (MSE):** {mse:.2f}")
-        st.write(f"**R² Score:** {r2:.2f}")
+    # Visualization
+    fig, ax = plt.subplots(figsize=(10,6))
+    sns.heatmap(df_processed.corr(), annot=True, fmt=".2f", cmap="coolwarm", ax=ax)
+    st.write("### Correlation Matrix")
+    st.pyplot(fig)
 
-    st.write("### Correlation Matrix Heatmap")
-    plt.figure(figsize=(10,8))
-    sns.heatmap(df_processed.corr(), annot=True, fmt=".2f", cmap="coolwarm")
-    st.pyplot(plt)
-
-# Load model for prediction
-if st.button('Load Model and Predict'):
-    model = load_model()
-    st.success("Model loaded successfully!")
+# Prediction section
+if st.button('Predict Price'):
+    model, le_dict, scaler = load_model()
     
-    # Making predictions
-    crop = st.selectbox('Select Crop', df['crop_type'].unique())
-    month = st.selectbox('Select Month', [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12])
-    state = st.selectbox('Select State', df['state'].unique())
-    city = st.selectbox('Select City', df['city'].unique())
+    # Get user input
+    crop = st.selectbox('Crop', df['crop_type'].unique())
+    month = st.selectbox('Month', range(1,13))
+    state = st.selectbox('State', df['state'].unique())
+    city = st.selectbox('City', df['city'].unique())
 
-    # Use the smart_fill_values function to get default values for missing data
-    input_data = smart_fill_values(crop, month, state, city)
+    # Create input DataFrame
+    input_df = pd.DataFrame([smart_fill_values(crop, month, state, city)])
+    
+    # Preprocess input
+    input_processed = preprocess_data(input_df, le_dict, scaler, fit=False)
+    input_processed = input_processed[df_processed.drop('price_₹/ton', axis=1).columns]
 
-    # Convert input_data into a DataFrame and preprocess
-    input_df = pd.DataFrame([input_data])
-
-    # Preprocess the input data
-    input_df_processed = preprocess_data(input_df)
-
-    # Make prediction using the trained model
-    predicted_price = model.predict(input_df_processed)
-
-    st.write(f"The predicted price for {crop} in {month}/{year} is ₹{predicted_price[0]:.2f} per ton.")
+    # Predict
+    price = model.predict(input_processed)[0]
+    st.success(f"Predicted price for {crop}: ₹{price:.2f}/ton")
