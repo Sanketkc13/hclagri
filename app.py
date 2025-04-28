@@ -10,15 +10,15 @@ from xgboost import XGBRegressor
 def preprocess_data(df, training=True, le_dict=None, scaler=None):
     df = df.copy()
 
-    # Separate features and target
-    X = df.drop(columns=['price_₹/ton'])
-    y = df['price_₹/ton']
+    if training:
+        X = df.drop(columns=['price_₹/ton'])
+        y = df['price_₹/ton']
+    else:
+        X = df
 
-    # Identify categorical and numerical features
     cat_features = X.select_dtypes(include=['object']).columns.tolist()
     num_features = X.select_dtypes(exclude=['object']).columns.tolist()
 
-    # Initialize label encoders if training
     if training:
         le_dict = {col: LabelEncoder() for col in cat_features}
         for col in cat_features:
@@ -27,7 +27,6 @@ def preprocess_data(df, training=True, le_dict=None, scaler=None):
         for col in cat_features:
             X[col] = le_dict[col].transform(X[col])
 
-    # Initialize scaler if training
     if training:
         scaler = StandardScaler()
         X_scaled = scaler.fit_transform(X)
@@ -44,6 +43,10 @@ def preprocess_data(df, training=True, le_dict=None, scaler=None):
 # Train model
 def train_model():
     df = pd.read_csv('cleaned_dataset.csv')
+
+    selected_cols = ['state', 'district', 'crop_type', 'time', 'rainfall', 'temperature', 'price_₹/ton']
+    df = df[selected_cols]
+
     df_processed, le_dict, scaler, y = preprocess_data(df, training=True)
 
     X_train, X_test, y_train, y_test = train_test_split(df_processed, y, test_size=0.2, random_state=42)
@@ -51,7 +54,6 @@ def train_model():
     model = XGBRegressor()
     model.fit(X_train, y_train)
 
-    # Save model
     with open('model.pkl', 'wb') as f:
         pickle.dump({'model': model, 'le_dict': le_dict, 'scaler': scaler}, f)
 
@@ -64,7 +66,7 @@ def load_model():
     return data['model'], data['le_dict'], data['scaler']
 
 # Streamlit App
-st.title('Agricultural Price Prediction 🚜🌾')
+st.title('🌾 Agri Price Predictor 🌾')
 
 # Train or Load
 if st.button('Train Model'):
@@ -78,37 +80,49 @@ else:
         st.warning('Model not found. Please train the model first.')
         st.stop()
 
-# User input
-st.header('Enter crop details for prediction:')
+# Load dataset to get dropdown options and rainfall/temp values
+df = pd.read_csv('cleaned_dataset.csv')
+selected_cols = ['state', 'district', 'crop_type', 'time', 'rainfall', 'temperature', 'price_₹/ton']
+df = df[selected_cols]
 
-state = st.text_input('State')
-district = st.text_input('District')
-market = st.text_input('Market')
-commodity = st.text_input('Commodity')
-variety = st.text_input('Variety')
-grade = st.text_input('Grade')
-min_price = st.number_input('Minimum Price (₹/quintal)', min_value=0)
-max_price = st.number_input('Maximum Price (₹/quintal)', min_value=0)
-modal_price = st.number_input('Modal Price (₹/quintal)', min_value=0)
+st.header('Enter details for prediction:')
 
+# Dropdown menus
+state = st.selectbox('Select State', sorted(df['state'].unique()))
+district = st.selectbox('Select District', sorted(df[df['state'] == state]['district'].unique()))
+crop_type = st.selectbox('Select Crop Type', sorted(df['crop_type'].unique()))
+time = st.selectbox('Select Time', sorted(df['time'].unique()))
+
+# Prediction
 if st.button('Predict Price'):
-    # Create input DataFrame
-    input_data = {
-        'state': [state],
-        'district': [district],
-        'market': [market],
-        'commodity': [commodity],
-        'variety': [variety],
-        'grade': [grade],
-        'min_price': [min_price],
-        'max_price': [max_price],
-        'modal_price': [modal_price]
-    }
-    input_df = pd.DataFrame(input_data)
+    # Find matching row in dataset
+    match = df[
+        (df['state'] == state) &
+        (df['district'] == district) &
+        (df['crop_type'] == crop_type) &
+        (df['time'] == time)
+    ]
 
-    try:
-        input_df_processed = preprocess_data(input_df, training=False, le_dict=le_dict, scaler=scaler)
-        predicted_price = model.predict(input_df_processed)
-        st.success(f'Predicted Price: ₹{predicted_price[0]:,.2f} per ton')
-    except Exception as e:
-        st.error(f"Error in prediction: {str(e)}")
+    if match.empty:
+        st.error('No matching data found. Please try different inputs.')
+    else:
+        # Use rainfall and temperature from the dataset
+        rainfall = match.iloc[0]['rainfall']
+        temperature = match.iloc[0]['temperature']
+
+        input_data = {
+            'state': [state],
+            'district': [district],
+            'crop_type': [crop_type],
+            'time': [time],
+            'rainfall': [rainfall],
+            'temperature': [temperature]
+        }
+        input_df = pd.DataFrame(input_data)
+
+        try:
+            input_df_processed = preprocess_data(input_df, training=False, le_dict=le_dict, scaler=scaler)
+            predicted_price = model.predict(input_df_processed)
+            st.success(f'Predicted Price: ₹{predicted_price[0]:,.2f} per ton')
+        except Exception as e:
+            st.error(f"Error during prediction: {str(e)}")
