@@ -77,7 +77,7 @@ def train_model(df):
     return best_model, mae, mse, r2
 
 # Load dataset
-df = pd.read_csv('your_dataset.csv')  # <- Update your file path here
+df = pd.read_csv('cleaned_dataset.csv')  # <- Update your file path here
 
 # Streamlit App
 st.title('Agriculture Price Prediction')
