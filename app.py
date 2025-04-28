@@ -169,33 +169,33 @@ def main():
         else:
             st.warning("No trained model found. Upload data and train model first.")
 
-   with tab5:  # Regional Analysis
-    st.header("Geographical Price Distribution")
-    
-    try:
-        # Load India states GeoJSON
-        india_geojson = "https://raw.githubusercontent.com/geohacker/india/master/state/india_state.geojson"
+    with tab5:  # Regional Analysis (Fixed Indentation)
+        st.header("Geographical Price Distribution")
         
-        avg_prices = df.groupby(['state', 'crop_type'])['price_₹/ton'].mean().reset_index()
-        
-        fig = px.choropleth(
-            avg_prices,
-            geojson=india_geojson,
-            locations="state",
-            featureidkey="properties.NAME_1",
-            color="price_₹/ton",
-            color_continuous_scale=px.colors.sequential.Plasma,
-            hover_name="state",
-            animation_frame="crop_type",
-            scope="asia",
-            title="India State-wise Price Variations"
-        )
-        
-        fig.update_geos(fitbounds="locations", visible=False)
-        st.plotly_chart(fig, use_container_width=True)
-        
-    except Exception as e:
-        st.error(f"Map rendering error: {str(e)}")
+        try:
+            # Load India states GeoJSON
+            india_geojson = "https://raw.githubusercontent.com/geohacker/india/master/state/india_state.geojson"
+            
+            avg_prices = df.groupby(['state', 'crop_type'])['price_₹/ton'].mean().reset_index()
+            
+            fig = px.choropleth(
+                avg_prices,
+                geojson=india_geojson,
+                locations="state",
+                featureidkey="properties.NAME_1",
+                color="price_₹/ton",
+                color_continuous_scale=px.colors.sequential.Plasma,
+                hover_name="state",
+                animation_frame="crop_type",
+                scope="asia",
+                title="India State-wise Price Variations"
+            )
+            
+            fig.update_geos(fitbounds="locations", visible=False)
+            st.plotly_chart(fig, use_container_width=True)
+            
+        except Exception as e:
+            st.error(f"Map rendering error: {str(e)}")
 
     # Report generation
     st.sidebar.header("Report Generation")
