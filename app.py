@@ -51,7 +51,7 @@ def train_model():
         st.write("Training model...")
 
         # Load dataset
-        df = pd.read_csv('your_dataset.csv')
+        df = pd.read_csv('cleaned_dataset.csv')
 
         # Preprocess
         df_processed, le_dict, scaler = preprocess_data(df, training=True)
