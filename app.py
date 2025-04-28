@@ -9,8 +9,8 @@ from xgboost import XGBRegressor
 def preprocess_data(df, training=True):
     # Encoding categorical columns
     le_dict = {}
-    categorical_columns = ['State', 'District', 'Crop Type', 'Time']
-
+    categorical_columns = ['State', 'District', 'Crop_Type', 'Season']  # Updated column names
+    
     for col in categorical_columns:
         le = LabelEncoder()
         df[col] = le.fit_transform(df[col])
@@ -21,7 +21,7 @@ def preprocess_data(df, training=True):
     numerical_columns = ['Rainfall', 'Temperature']
 
     X = df[categorical_columns + numerical_columns]
-    y = df['Price (₹/ton)']
+    y = df['Price']  # Updated target column name
 
     if training:
         X_scaled = scaler.fit_transform(X)
@@ -32,76 +32,110 @@ def preprocess_data(df, training=True):
 
 # Function to train the model
 def train_model():
-    # Load dataset
-    df = pd.read_csv('cleaned_dataset.csv')
+    try:
+        # Load dataset
+        df = pd.read_csv('cleaned_dataset.csv')
 
-    # Debugging: Check columns
-    st.write('Columns in your dataset:', df.columns.tolist())  # Show columns to help identify any mismatch
+        # Debugging: Show actual columns
+        st.write('Actual columns in dataset:', df.columns.tolist())
 
-    # Define the columns to be selected (adjust according to actual dataset)
-    selected_cols = ['State', 'District', 'Crop Type', 'Time', 'Rainfall', 'Temperature', 'Price (₹/ton)']
+        # Updated column names based on typical CSV conventions
+        selected_cols = ['State', 'District', 'Crop_Type', 'Season', 'Rainfall', 'Temperature', 'Price']
+        
+        # Verify columns exist in dataframe
+        missing_cols = [col for col in selected_cols if col not in df.columns]
+        if missing_cols:
+            raise KeyError(f"Columns missing from dataset: {missing_cols}")
 
-    # Selecting the relevant columns from the dataset
-    df = df[selected_cols]
+        df = df[selected_cols]
 
-    # Preprocess the data
-    df_processed, le_dict, scaler, y = preprocess_data(df, training=True)
+        # Preprocess the data
+        df_processed, le_dict, scaler, y = preprocess_data(df, training=True)
 
-    # Split the data into training and testing
-    X_train, X_test, y_train, y_test = train_test_split(df_processed, y, test_size=0.2, random_state=42)
+        # Split the data
+        X_train, X_test, y_train, y_test = train_test_split(df_processed, y, test_size=0.2, random_state=42)
 
-    # Initialize and train the XGBoost model
-    model = XGBRegressor()
-    model.fit(X_train, y_train)
+        # Initialize and train model
+        model = XGBRegressor()
+        model.fit(X_train, y_train)
 
-    # Save the model, le_dict, and scaler
-    with open('model.pkl', 'wb') as f:
-        pickle.dump({'model': model, 'le_dict': le_dict, 'scaler': scaler}, f)
+        # Save model components
+        with open('model.pkl', 'wb') as f:
+            pickle.dump({'model': model, 'le_dict': le_dict, 'scaler': scaler}, f)
 
-    return model, le_dict, scaler
+        return model, le_dict, scaler
+
+    except Exception as e:
+        st.error(f"Error in model training: {str(e)}")
+        raise
 
 # Function to load the model
 def load_model():
-    with open('model.pkl', 'rb') as f:
-        data = pickle.load(f)
-    return data['model'], data['le_dict'], data['scaler']
+    try:
+        with open('model.pkl', 'rb') as f:
+            data = pickle.load(f)
+        return data['model'], data['le_dict'], data['scaler']
+    except FileNotFoundError:
+        st.error("Model file not found. Please train the model first.")
+        raise
+    except Exception as e:
+        st.error(f"Error loading model: {str(e)}")
+        raise
 
-# Streamlit application logic
+# Streamlit application
 def app():
-    # Load the trained model and preprocessing components
-    model, le_dict, scaler = load_model()
+    try:
+        model, le_dict, scaler = load_model()
 
-    # Input fields for state, district, crop type, and time
-    state = st.selectbox("Select State", le_dict['State'].classes_)
-    district = st.selectbox("Select District", le_dict['District'].classes_)
-    crop_type = st.selectbox("Select Crop Type", le_dict['Crop Type'].classes_)
-    time = st.selectbox("Select Time", le_dict['Time'].classes_)
+        # Input fields with proper labels
+        st.header("Crop Price Prediction")
+        
+        # Create two columns for better layout
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            state = st.selectbox("State", le_dict['State'].classes_)
+            district = st.selectbox("District", le_dict['District'].classes_)
+            crop_type = st.selectbox("Crop Type", le_dict['Crop_Type'].classes_)
+            
+        with col2:
+            season = st.selectbox("Season", le_dict['Season'].classes_)
+            rainfall = st.number_input("Rainfall (mm)", min_value=0.0, value=100.0)
+            temperature = st.number_input("Temperature (°C)", min_value=0.0, value=25.0)
 
-    # Create input data based on selections
-    input_data = {
-        'State': [state],
-        'District': [district],
-        'Crop Type': [crop_type],
-        'Time': [time],
-        'Rainfall': [30],  # Default value for rainfall
-        'Temperature': [25]  # Default value for temperature
-    }
+        # Create input dataframe
+        input_data = {
+            'State': [state],
+            'District': [district],
+            'Crop_Type': [crop_type],
+            'Season': [season],
+            'Rainfall': [rainfall],
+            'Temperature': [temperature]
+        }
 
-    input_df = pd.DataFrame(input_data)
+        input_df = pd.DataFrame(input_data)
 
-    # Apply the same preprocessing as during training
-    input_df_encoded = input_df.copy()
-    for col in ['State', 'District', 'Crop Type', 'Time']:
-        input_df_encoded[col] = le_dict[col].transform(input_df_encoded[col])
+        # Transform categorical features
+        for col in ['State', 'District', 'Crop_Type', 'Season']:
+            input_df[col] = le_dict[col].transform(input_df[col])
 
-    # Scaling the input data (excluding price)
-    input_df_processed = scaler.transform(input_df_encoded[['State', 'District', 'Crop Type', 'Time', 'Rainfall', 'Temperature']])
+        # Scale features
+        input_scaled = scaler.transform(input_df)
 
-    # Predict the price using the trained model
-    predicted_price = model.predict(input_df_processed)
+        # Make prediction
+        if st.button("Predict Price"):
+            predicted_price = model.predict(input_scaled)
+            st.success(f"Predicted Price: ₹{predicted_price[0]:.2f}/ton")
 
-    # Display the predicted price
-    st.write(f"Predicted Price (₹/ton): {predicted_price[0]:.2f}")
+    except Exception as e:
+        st.error(f"Application error: {str(e)}")
 
 if __name__ == "__main__":
+    # First train the model
+    try:
+        train_model()
+    except:
+        st.error("Could not train model. Check if cleaned_dataset.csv exists with correct columns.")
+    
+    # Then run the app
     app()
