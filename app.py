@@ -130,7 +130,7 @@ if st.button('Load Model and Predict'):
     st.success("Model loaded successfully!")
     
     # Making predictions
-    crop = st.selectbox('Select Crop', df['crop'].unique())
+    crop = st.selectbox('Select Crop', df['crop_type'].unique())
     month = st.selectbox('Select Month', [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12])
     state = st.selectbox('Select State', df['state'].unique())
     city = st.selectbox('Select City', df['city'].unique())
