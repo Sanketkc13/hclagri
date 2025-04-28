@@ -7,6 +7,7 @@ from sklearn.model_selection import train_test_split, GridSearchCV
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from xgboost import XGBRegressor
+import pickle
 
 # Title
 st.title("Agriculture Price Prediction App")
@@ -58,6 +59,17 @@ def preprocess_data(df):
 
     return df
 
+# Save trained model
+def save_model(model):
+    with open('xgboost_agricultural_price_model.pkl', 'wb') as f:
+        pickle.dump(model, f)
+
+# Load trained model
+def load_model():
+    with open('xgboost_agricultural_price_model.pkl', 'rb') as f:
+        model = pickle.load(f)
+    return model
+
 # Model training
 def train_model(df):
     X = df.drop(['price_₹/ton'], axis=1)
@@ -79,6 +91,9 @@ def train_model(df):
     grid_search.fit(X_train, y_train)
 
     best_model = grid_search.best_estimator_
+
+    # Save the trained model to a file
+    save_model(best_model)
 
     y_pred = best_model.predict(X_test)
 
@@ -108,3 +123,28 @@ if st.button('Train Model'):
     plt.figure(figsize=(10,8))
     sns.heatmap(df_processed.corr(), annot=True, fmt=".2f", cmap="coolwarm")
     st.pyplot(plt)
+
+# Load model for prediction
+if st.button('Load Model and Predict'):
+    model = load_model()
+    st.success("Model loaded successfully!")
+    
+    # Making predictions
+    crop = st.selectbox('Select Crop', df['crop'].unique())
+    month = st.selectbox('Select Month', [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12])
+    state = st.selectbox('Select State', df['state'].unique())
+    city = st.selectbox('Select City', df['city'].unique())
+
+    # Use the smart_fill_values function to get default values for missing data
+    input_data = smart_fill_values(crop, month, state, city)
+
+    # Convert input_data into a DataFrame and preprocess
+    input_df = pd.DataFrame([input_data])
+
+    # Preprocess the input data
+    input_df_processed = preprocess_data(input_df)
+
+    # Make prediction using the trained model
+    predicted_price = model.predict(input_df_processed)
+
+    st.write(f"The predicted price for {crop} in {month}/{year} is ₹{predicted_price[0]:.2f} per ton.")
