@@ -98,7 +98,7 @@ def main():
         st.dataframe(df.sort_values('date', ascending=False).head(10), 
                     use_container_width=True)
 
-    with tab2:  # Historical Trends
+    with tab2:  # Historical Trends (Fixed Indentation)
         st.header("Historical Price Analysis")
         
         col1, col2 = st.columns(2)
@@ -106,15 +106,46 @@ def main():
             crop_filter = st.selectbox("Select Crop", df['crop_type'].unique())
         
         with col2:
-            date_range = st.date_input("Select Date Range", 
-                                      [df['date'].min(), df['date'].max()])
+            # Date range initialization
+            min_date = df['date'].min().date()
+            max_date = df['date'].max().date()
+            
+            # Session state management
+            if 'date_range' not in st.session_state:
+                st.session_state.date_range = [min_date, max_date]
+            
+            date_range = st.date_input(
+                "Select Date Range",
+                value=st.session_state.date_range,
+                min_value=min_date,
+                max_value=max_date
+            )
         
-        filtered_df = df[(df['crop_type'] == crop_filter) & 
-                        (df['date'].between(pd.to_datetime(date_range[0]), 
-                                         pd.to_datetime(date_range[1])))]
+        # Data filtering
+        filtered_df = df[
+            (df['crop_type'] == crop_filter) & 
+            (df['date'].between(pd.to_datetime(date_range[0]), 
+                              pd.to_datetime(date_range[1])))
+        ]
         
-        fig = px.line(filtered_df, x='date', y='price_₹/ton', 
-                     title=f"{crop_filter} Price Trend")
+        if filtered_df.empty:
+            st.error("No data available for selected date range. Showing full historical trend.")
+            
+            # Reset button
+            col1, col2, col3 = st.columns([1, 2, 1])
+            with col2:
+                if st.button("Reset to Default Date Range"):
+                    st.session_state.date_range = [min_date, max_date]
+                    st.rerun()
+            
+            # Fallback to full data
+            filtered_df = df[df['crop_type'] == crop_filter]
+            fig = px.line(filtered_df, x='date', y='price_₹/ton', 
+                         title=f"{crop_filter} Full Price Trend")
+        else:
+            fig = px.line(filtered_df, x='date', y='price_₹/ton', 
+                         title=f"{crop_filter} Price Trend ({date_range[0]} to {date_range[1]})")
+        
         st.plotly_chart(fig, use_container_width=True)
 
     with tab3:  # Weather Impact
@@ -134,7 +165,6 @@ def main():
             st.error("Statsmodels required for trendlines. Install with: pip install statsmodels")
         except Exception as e:
             st.error(f"Error generating plot: {str(e)}")
-
 
     with tab4:  # Price Prediction
         st.header("Price Prediction Model")
@@ -184,7 +214,7 @@ def main():
         else:
             st.warning("No trained model found. Upload data and train model first.")
 
-    with tab5:  # Regional Analysis (Fixed Indentation)
+    with tab5:  # Regional Analysis
         st.header("Geographical Price Distribution")
         
         try:
