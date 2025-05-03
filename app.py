@@ -135,6 +135,7 @@ def main():
         except Exception as e:
             st.error(f"Error generating plot: {str(e)}")
 
+
     with tab4:  # Price Prediction
         st.header("Price Prediction Model")
         
@@ -151,13 +152,26 @@ def main():
             
             with col2:
                 season = st.selectbox("Season", le_dict['season'].classes_)
-                month = st.selectbox("Month", range(1, 13))
-                rainfall = st.number_input("Rainfall (mm)", value=100.0)
-                temp = st.number_input("Temperature (°C)", value=25.0)
-            
+                
+                # Automatically calculate weather factors
+                filtered_data = df[
+                    (df['state'] == state) & 
+                    (df['city'] == city) & 
+                    (df['season'] == season)
+                ]
+                
+                if not filtered_data.empty:
+                    avg_month = int(filtered_data['date'].dt.month.mode()[0])
+                    avg_rainfall = filtered_data['rainfall_mm'].mean()
+                    avg_temp = filtered_data['temperature_c'].mean()
+                else:
+                    avg_month = 6  # Default values if no historical data
+                    avg_rainfall = 100.0
+                    avg_temp = 25.0
+
             if st.button("Predict Price"):
                 input_data = pd.DataFrame([[
-                    state, city, crop_type, season, month, rainfall, temp
+                    state, city, crop_type, season, avg_month, avg_rainfall, avg_temp
                 ]], columns=['state', 'city', 'crop_type', 'season', 
                            'month', 'rainfall_mm', 'temperature_c'])
                 
@@ -166,6 +180,7 @@ def main():
                 
                 prediction = model.predict(input_data)
                 st.success(f"Predicted Price: ₹{prediction[0]:.2f}/ton")
+                st.caption(f"Based on {state}'s {season} season averages: {avg_rainfall:.1f}mm rainfall, {avg_temp:.1f}°C")
         else:
             st.warning("No trained model found. Upload data and train model first.")
 
