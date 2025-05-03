@@ -98,30 +98,32 @@ def main():
         st.dataframe(df.sort_values('date', ascending=False).head(10), 
                     use_container_width=True)
 
-    with tab2:  # Historical Trends (Fixed Indentation)
+    with tab2:  # Historical Trends (Fixed)
         st.header("Historical Price Analysis")
+        
+        # Initialize session state
+        if 'date_range' not in st.session_state:
+            st.session_state.date_range = [
+                df['date'].min().date(),
+                df['date'].max().date()
+            ]
         
         col1, col2 = st.columns(2)
         with col1:
             crop_filter = st.selectbox("Select Crop", df['crop_type'].unique())
         
         with col2:
-            # Date range initialization
-            min_date = df['date'].min().date()
-            max_date = df['date'].max().date()
-            
-            # Session state management
-            if 'date_range' not in st.session_state:
-                st.session_state.date_range = [min_date, max_date]
-            
             date_range = st.date_input(
                 "Select Date Range",
                 value=st.session_state.date_range,
-                min_value=min_date,
-                max_value=max_date
+                min_value=df['date'].min().date(),
+                max_value=df['date'].max().date(),
+                key="date_range_selector"
             )
         
-        # Data filtering
+        # Update session state
+        st.session_state.date_range = date_range
+        
         filtered_df = df[
             (df['crop_type'] == crop_filter) & 
             (df['date'].between(pd.to_datetime(date_range[0]), 
@@ -131,14 +133,15 @@ def main():
         if filtered_df.empty:
             st.error("No data available for selected date range. Showing full historical trend.")
             
-            # Reset button
-            col1, col2, col3 = st.columns([1, 2, 1])
+            col1, col2, col3 = st.columns([1,2,1])
             with col2:
                 if st.button("Reset to Default Date Range"):
-                    st.session_state.date_range = [min_date, max_date]
-                    st.rerun()
+                    st.session_state.date_range = [
+                        df['date'].min().date(),
+                        df['date'].max().date()
+                    ]
+                    st.experimental_rerun()
             
-            # Fallback to full data
             filtered_df = df[df['crop_type'] == crop_filter]
             fig = px.line(filtered_df, x='date', y='price_₹/ton', 
                          title=f"{crop_filter} Full Price Trend")
@@ -183,7 +186,6 @@ def main():
             with col2:
                 season = st.selectbox("Season", le_dict['season'].classes_)
                 
-                # Automatically calculate weather factors
                 filtered_data = df[
                     (df['state'] == state) & 
                     (df['city'] == city) & 
@@ -195,7 +197,7 @@ def main():
                     avg_rainfall = filtered_data['rainfall_mm'].mean()
                     avg_temp = filtered_data['temperature_c'].mean()
                 else:
-                    avg_month = 6  # Default values if no historical data
+                    avg_month = 6
                     avg_rainfall = 100.0
                     avg_temp = 25.0
 
@@ -218,7 +220,6 @@ def main():
         st.header("Geographical Price Distribution")
         
         try:
-            # Load India states GeoJSON
             india_geojson = "https://raw.githubusercontent.com/geohacker/india/master/state/india_state.geojson"
             
             avg_prices = df.groupby(['state', 'crop_type'])['price_₹/ton'].mean().reset_index()
