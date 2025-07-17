@@ -109,7 +109,7 @@ def main():
         with col3:
             st.metric("Active Regions", 
                      df['state'].nunique(),
-                     "States tracking prices")
+                     "Provinces tracking prices")
 
         st.subheader("Latest Market Entries")
         st.dataframe(df.sort_values('date', ascending=False).head(10), 
@@ -231,25 +231,24 @@ def main():
         else:
             st.warning("No trained model found. Upload data and train model first.")
 
-    with tab5:  # Regional Analysis
-        st.header("Geographical Price Distribution")
+    with tab5:  # Regional Analysis for Nepal
+        st.header("Geographical Price Distribution (Nepal Provinces)")
 
         try:
-            india_geojson = "https://raw.githubusercontent.com/geohacker/india/master/state/india_state.geojson"
+            nepal_geojson = "https://raw.githubusercontent.com/sandeshchapagain/nepal-geojson/main/nepal-provinces.geojson"
 
             avg_prices = df.groupby(['state', 'crop_type'])['price_₹/ton'].mean().reset_index()
 
             fig = px.choropleth(
                 avg_prices,
-                geojson=india_geojson,
+                geojson=nepal_geojson,
                 locations="state",
-                featureidkey="properties.NAME_1",
+                featureidkey="properties.name",
                 color="price_₹/ton",
-                color_continuous_scale=px.colors.sequential.Plasma,
+                color_continuous_scale=px.colors.sequential.YlOrBr,
                 hover_name="state",
                 animation_frame="crop_type",
-                scope="asia",
-                title="India State-wise Price Variations"
+                title="Nepal Province-wise Price Variations"
             )
 
             fig.update_geos(fitbounds="locations", visible=False)
