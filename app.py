@@ -4,6 +4,8 @@ import streamlit as st
 import plotly.express as px
 from sklearn.preprocessing import LabelEncoder
 from sklearn.model_selection import train_test_split
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.linear_model import LinearRegression
 from xgboost import XGBRegressor
 import datetime
 import os
@@ -17,7 +19,7 @@ def load_data(file_input='cleaned_dataset.csv'):
     try:
         if isinstance(file_input, str) and os.path.exists(file_input):
             df = pd.read_csv(file_input)
-        elif hasattr(file_input, 'read'):  # uploaded file-like object
+        elif hasattr(file_input, 'read'):
             df = pd.read_csv(file_input)
         else:
             return pd.DataFrame()
@@ -46,11 +48,19 @@ def train_model(df):
 
         X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
-        model = XGBRegressor()
-        model.fit(X_train, y_train)
+        models = {
+            'XGBoost': XGBRegressor(),
+            'Random Forest': RandomForestRegressor(),
+            'Linear Regression': LinearRegression()
+        }
+
+        trained_models = {}
+        for name, model in models.items():
+            model.fit(X_train, y_train)
+            trained_models[name] = model
 
         with open('model.pkl', 'wb') as f:
-            pickle.dump({'model': model, 'le_dict': le_dict}, f)
+            pickle.dump({'models': trained_models, 'le_dict': le_dict}, f)
 
         return True
     except Exception as e:
@@ -92,7 +102,7 @@ def main():
         "🗺️ Regional Analysis"
     ])
 
-    with tab1:  # Real-Time Dashboard
+    with tab1:
         st.header("Market Overview")
         col1, col2, col3 = st.columns(3)
 
@@ -115,10 +125,9 @@ def main():
         st.dataframe(df.sort_values('date', ascending=False).head(10), 
                     use_container_width=True)
 
-    with tab2:  # Historical Trends
+    with tab2:
         st.header("Historical Price Analysis")
 
-        # Initialize session state
         if 'date_range' not in st.session_state:
             st.session_state.date_range = [
                 df['date'].min().date(),
@@ -167,7 +176,7 @@ def main():
 
         st.plotly_chart(fig, use_container_width=True)
 
-    with tab3:  # Weather Impact
+    with tab3:
         st.header("Climate Correlation Analysis")
 
         col1, col2 = st.columns(2)
@@ -185,16 +194,17 @@ def main():
         except Exception as e:
             st.error(f"Error generating plot: {str(e)}")
 
-    with tab4:  # Price Prediction
+    with tab4:
         st.header("Price Prediction Model")
 
         if os.path.exists('model.pkl'):
             with open('model.pkl', 'rb') as f:
                 model_data = pickle.load(f)
-            model, le_dict = model_data['model'], model_data['le_dict']
+            models, le_dict = model_data['models'], model_data['le_dict']
 
             col1, col2 = st.columns(2)
             with col1:
+                model_choice = st.selectbox("Select Model", list(models.keys()))
                 state = st.selectbox("State", le_dict['state'].classes_)
                 city = st.selectbox("City", le_dict['city'].classes_)
                 crop_type = st.selectbox("Crop Type", le_dict['crop_type'].classes_)
@@ -225,13 +235,14 @@ def main():
                 for col in ['state', 'city', 'crop_type', 'season', 'month']:
                     input_data[col] = le_dict[col].transform(input_data[col])
 
-                prediction = model.predict(input_data)
-                st.success(f"Predicted Price: ₹{prediction[0]:.2f}/ton")
+                selected_model = models[model_choice]
+                prediction = selected_model.predict(input_data)
+                st.success(f"[{model_choice}] Predicted Price: ₹{prediction[0]:.2f}/ton")
                 st.caption(f"Based on {state}'s {season} season averages: {avg_rainfall:.1f}mm rainfall, {avg_temp:.1f}°C")
         else:
             st.warning("No trained model found. Upload data and train model first.")
 
-    with tab5:  # Regional Analysis for Nepal
+    with tab5:
         st.header("Geographical Price Distribution (Nepal Provinces)")
 
         try:
