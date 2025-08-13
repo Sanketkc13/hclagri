@@ -13,12 +13,62 @@ from sklearn.metrics import mean_absolute_error, r2_score
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
 from sklearn.decomposition import PCA
+import json
 import os
 
 # =============================
 # App Configuration
 # =============================
 st.set_page_config(page_title="AgriPrice Analyzer", layout="wide")
+
+# =============================
+# Province helpers (names + centroids + optional embedded GeoJSON)
+# =============================
+NEPAL_PROVINCE_ALIASES = {
+    # New names → canonical; old names → canonical
+    'Koshi': 'Province 1', 'Province 1': 'Province 1', 'Province No. 1': 'Province 1',
+    'Madhesh': 'Province 2', 'Province 2': 'Province 2', 'Province No. 2': 'Province 2',
+    'Bagmati': 'Bagmati', 'Province 3': 'Bagmati', 'Bagmati Province': 'Bagmati',
+    'Gandaki': 'Gandaki', 'Province 4': 'Gandaki', 'Gandaki Province': 'Gandaki',
+    'Lumbini': 'Lumbini', 'Province 5': 'Lumbini', 'Lumbini Province': 'Lumbini',
+    'Karnali': 'Karnali', 'Province 6': 'Karnali', 'Karnali Province': 'Karnali',
+    'Sudurpashchim': 'Sudurpashchim', 'Province 7': 'Sudurpashchim', 'Sudurpashchim Province': 'Sudurpashchim'
+}
+
+# Province centroids (rough) used for offline scatter fallback
+NEPAL_PROVINCE_CENTROIDS = {
+    'Province 1': (27.2, 87.3),
+    'Province 2': (26.8, 85.2),
+    'Bagmati': (27.6, 85.4),
+    'Gandaki': (28.2, 84.2),
+    'Lumbini': (27.7, 83.3),
+    'Karnali': (29.1, 82.6),
+    'Sudurpashchim': (29.2, 80.9)
+}
+
+# A very small, simplified embedded GeoJSON (not high precision) for offline choropleth.
+# This is intentionally simplified to keep code size reasonable. For production accuracy,
+# place a full-resolution file at ./assets/nepal_provinces.geojson
+EMBEDDED_NEPAL_GEOJSON = {
+    "type": "FeatureCollection",
+    "features": [
+        {"type":"Feature","properties":{"name":"Province 1"},"geometry":{"type":"Polygon","coordinates":[[[87.9,26.4],[87.9,27.8],[86.5,27.8],[86.5,26.4],[87.9,26.4]]]}},
+        {"type":"Feature","properties":{"name":"Province 2"},"geometry":{"type":"Polygon","coordinates":[[[86.5,26.3],[86.5,27.1],[84.9,27.1],[84.9,26.3],[86.5,26.3]]]}},
+        {"type":"Feature","properties":{"name":"Bagmati"},"geometry":{"type":"Polygon","coordinates":[[[86.6,27.1],[86.6,28.1],[85.2,28.1],[85.2,27.1],[86.6,27.1]]]}},
+        {"type":"Feature","properties":{"name":"Gandaki"},"geometry":{"type":"Polygon","coordinates":[[[85.2,27.3],[85.2,28.6],[83.9,28.6],[83.9,27.3],[85.2,27.3]]]}},
+        {"type":"Feature","properties":{"name":"Lumbini"},"geometry":{"type":"Polygon","coordinates":[[[84.0,26.8],[84.0,27.8],[82.9,27.8],[82.9,26.8],[84.0,26.8]]]}},
+        {"type":"Feature","properties":{"name":"Karnali"},"geometry":{"type":"Polygon","coordinates":[[[83.2,28.2],[83.2,29.6],[81.9,29.6],[81.9,28.2],[83.2,28.2]]]}},
+        {"type":"Feature","properties":{"name":"Sudurpashchim"},"geometry":{"type":"Polygon","coordinates":[[[81.9,28.0],[81.9,29.6],[80.0,29.6],[80.0,28.0],[81.9,28.0]]]}},
+    ]
+}
+
+
+def normalize_state_name(x: str) -> str:
+    if pd.isna(x):
+        return x
+    x = str(x).strip()
+    return NEPAL_PROVINCE_ALIASES.get(x, x)
+
 
 # =============================
 # Data Loading
@@ -33,6 +83,9 @@ def load_data(file_input='cleaned_dataset.csv'):
         else:
             return pd.DataFrame()
         df['date'] = pd.to_datetime(df['date'])
+        # Normalize state naming to match GeoJSON
+        if 'state' in df.columns:
+            df['state'] = df['state'].apply(normalize_state_name)
         return df
     except Exception as e:
         st.error(f"Error loading data: {e}")
@@ -41,6 +94,7 @@ def load_data(file_input='cleaned_dataset.csv'):
 # =============================
 # Helpers: Diagnostics & Tuning
 # =============================
+
 def plot_learning_curve_pipeline(pipeline, X, y, scoring='neg_mean_absolute_error', 
                                  train_sizes=np.linspace(0.1, 1.0, 5), cv=3, model_name='Model'):
     sizes, train_scores, val_scores = learning_curve(
@@ -141,24 +195,29 @@ def run_pca_analysis(preprocessor, X_df, color_by=None, n_components=10):
     return {'pca': pca, 'scree': scree_fig, 'cumulative': cum_fig, 'scatter': scatter_fig, 'explained': explained}
 
 # =============================
-# Training
+# Training (Option 2: One-Hot Encoding in a Pipeline for ALL models)
 # =============================
-def train_model(df):
+
+def build_preprocessor():
+    categorical_cols = ['state', 'city', 'crop_type', 'season', 'month']
+    numeric_cols = ['rainfall_mm', 'temperature_c']
+    preprocessor = ColumnTransformer(
+        transformers=[
+            ('cat', OneHotEncoder(handle_unknown='ignore'), categorical_cols),
+            ('num', StandardScaler(), numeric_cols)
+        ]
+    )
+    return preprocessor, categorical_cols + numeric_cols
+
+
+def train_model(df: pd.DataFrame):
     try:
         df = df.copy()
         df['month'] = df['date'].dt.month
 
-        categorical_cols = ['state', 'city', 'crop_type', 'season', 'month']
-        numeric_cols = ['rainfall_mm', 'temperature_c']
+        preprocessor, feature_cols = build_preprocessor()
 
-        preprocessor = ColumnTransformer(
-            transformers=[
-                ('cat', OneHotEncoder(handle_unknown='ignore'), categorical_cols),
-                ('num', StandardScaler(), numeric_cols)
-            ]
-        )
-
-        X = df[categorical_cols + numeric_cols]
+        X = df[feature_cols]
         y = df['price_₹/ton']
 
         X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
@@ -175,12 +234,13 @@ def train_model(df):
         for name, model in models.items():
             pipe = Pipeline(steps=[('preprocessor', preprocessor), ('regressor', model)])
 
-            # If XGBoost, add early stopping for better generalization and to track eval history
             fit_kwargs = {}
             if isinstance(model, XGBRegressor):
+                # NOTE: XGBoost receives ONLY numeric arrays because preprocessor outputs encodings.
+                # No need for enable_categorical.
                 fit_kwargs = {
                     'regressor__eval_set': [(X_test, y_test)],
-                    'regressor__early_stopping_rounds': 20,
+                    'regressor__early_stopping_rounds': 30,
                     'regressor__verbose': False,
                     'regressor__eval_metric': 'rmse'
                 }
@@ -206,6 +266,7 @@ def train_model(df):
 # =============================
 # Main App
 # =============================
+
 def main():
     st.title("Agricultural Market Price Analyzer 🌾")
 
@@ -305,16 +366,16 @@ def main():
             col1, col2 = st.columns(2)
             with col1:
                 model_choice = st.selectbox("Select Model", list(models.keys()))
-                state = st.selectbox("State", df['state'].unique())
-                city = st.selectbox("City", df['city'].unique())
-                crop_type = st.selectbox("Crop Type", df['crop_type'].unique())
+                state = st.selectbox("State", sorted(df['state'].dropna().unique()))
+                city = st.selectbox("City", sorted(df['city'].dropna().unique()))
+                crop_type = st.selectbox("Crop Type", sorted(df['crop_type'].dropna().unique()))
             with col2:
-                season = st.selectbox("Season", df['season'].unique())
+                season = st.selectbox("Season", sorted(df['season'].dropna().unique()))
                 filtered_data = df[(df['state'] == state) & (df['city'] == city) & (df['season'] == season)]
                 if not filtered_data.empty:
                     avg_month = int(filtered_data['date'].dt.month.mode()[0])
-                    avg_rainfall = filtered_data['rainfall_mm'].mean()
-                    avg_temp = filtered_data['temperature_c'].mean()
+                    avg_rainfall = float(filtered_data['rainfall_mm'].mean())
+                    avg_temp = float(filtered_data['temperature_c'].mean())
                 else:
                     avg_month = 6
                     avg_rainfall = 100.0
@@ -333,23 +394,48 @@ def main():
     with tabs[4]:
         st.header("Geographical Price Distribution (Nepal Provinces)")
         try:
-            nepal_geojson = "https://raw.githubusercontent.com/sandeshchapagain/nepal-geojson/main/nepal-provinces.geojson"
+            # Try local high-precision file first
+            local_path = os.path.join('assets', 'nepal_provinces.geojson')
+            geojson_obj = None
+            if os.path.exists(local_path):
+                with open(local_path, 'r', encoding='utf-8') as f:
+                    geojson_obj = json.load(f)
+            else:
+                # Use embedded simplified polygons
+                geojson_obj = EMBEDDED_NEPAL_GEOJSON
+
+            # Aggregate
             avg_prices = df.groupby(['state', 'crop_type'])['price_₹/ton'].mean().reset_index()
-            fig = px.choropleth(
-                avg_prices,
-                geojson=nepal_geojson,
-                locations="state",
-                featureidkey="properties.name",
-                color="price_₹/ton",
-                color_continuous_scale=px.colors.sequential.YlOrBr,
-                hover_name="state",
-                animation_frame="crop_type",
-                title="Nepal Province-wise Price Variations"
-            )
-            fig.update_geos(fitbounds="locations", visible=False)
-            st.plotly_chart(fig, use_container_width=True)
+            # Ensure names match geojson
+            avg_prices['state'] = avg_prices['state'].apply(normalize_state_name)
+
+            try:
+                fig = px.choropleth(
+                    avg_prices,
+                    geojson=geojson_obj,
+                    locations="state",
+                    featureidkey="properties.name",
+                    color="price_₹/ton",
+                    color_continuous_scale=px.colors.sequential.YlOrBr,
+                    hover_name="state",
+                    animation_frame="crop_type",
+                    title="Nepal Province-wise Price Variations"
+                )
+                fig.update_geos(fitbounds="locations", visible=False)
+                st.plotly_chart(fig, use_container_width=True)
+            except Exception as inner_e:
+                st.warning(f"Choropleth fallback (scatter) due to: {inner_e}")
+                # Scatter fallback using centroids
+                scatter_df = avg_prices.copy()
+                scatter_df['lat'] = scatter_df['state'].map(lambda s: NEPAL_PROVINCE_CENTROIDS.get(s, (27.7, 85.3))[0])
+                scatter_df['lon'] = scatter_df['state'].map(lambda s: NEPAL_PROVINCE_CENTROIDS.get(s, (27.7, 85.3))[1])
+                fig2 = px.scatter_geo(scatter_df, lat='lat', lon='lon', color='price_₹/ton', hover_name='state',
+                                      animation_frame='crop_type', projection='natural earth', title='Province Prices (fallback)')
+                fig2.update_geos(fitbounds="locations", visible=False)
+                st.plotly_chart(fig2, use_container_width=True)
         except Exception as e:
             st.error(f"Map rendering error: {str(e)}")
+            st.info("Tip: Place a full-resolution GeoJSON at ./assets/nepal_provinces.geojson for best results.")
 
     # ================= Model Diagnostics =================
     with tabs[5]:
@@ -390,7 +476,10 @@ def main():
                 rng = st.text_input("Parameter range (comma-separated)", value="50,100,200")
                 if st.button("Plot Validation Curve"):
                     try:
-                        vals = [float(v.strip()) for v in rng.split(',')] if 'learning_rate' in p else [int(v.strip()) if v.strip().lower() != 'none' else None for v in rng.split(',')]
+                        if 'learning_rate' in p or 'subsample' in p:
+                            vals = [float(v.strip()) for v in rng.split(',')]
+                        else:
+                            vals = [int(v.strip()) if v.strip().lower() != 'none' else None for v in rng.split(',')]
                         fig = plot_validation_curve_fig(models[vc_model], X, y, p, vals)
                         st.plotly_chart(fig, use_container_width=True)
                     except Exception as e:
@@ -398,13 +487,13 @@ def main():
 
             st.divider()
             st.subheader("➌ Hyperparameter Tuning (RandomizedSearchCV)")
-            tune_model = st.selectbox("Model to tune", ['XGBoost', 'Random Forest'])
+            tune_model_name = st.selectbox("Model to tune", ['XGBoost', 'Random Forest'])
             n_iter = st.slider("Search iterations", 5, 40, 15)
             cv_tune = st.slider("CV folds (tuning)", 2, 5, 3)
             if st.button("Run Tuning"):
                 with st.spinner("Running randomized search..."):
-                    base_pipe = models[tune_model]
-                    if tune_model == 'XGBoost':
+                    base_pipe = models[tune_model_name]
+                    if tune_model_name == 'XGBoost':
                         param_dist = {
                             'regressor__n_estimators': [50, 100, 200, 400],
                             'regressor__learning_rate': [0.01, 0.05, 0.1, 0.2],
@@ -423,7 +512,7 @@ def main():
 
                     # Allow saving tuned model
                     if st.button("Save tuned model"):
-                        models[tune_model + ' (tuned)'] = search.best_estimator_
+                        models[tune_model_name + ' (tuned)'] = search.best_estimator_
                         pickle.dump({'models': models, 'columns': columns}, open('model.pkl', 'wb'))
                         st.success("Saved! Reload the page to use it from the prediction tab.")
 
@@ -446,6 +535,12 @@ def main():
     if st.sidebar.button("📥 Generate Full Report"):
         report = df.describe().T
         st.sidebar.download_button(label="Download Summary Report", data=report.to_csv(), file_name="market_summary.csv", mime="text/csv")
+
+    # Helpful note for offline GeoJSON
+    with st.sidebar.expander("🗺️ Map Data Source"):
+        st.markdown("- Using **local** `./assets/nepal_provinces.geojson` if present.
+- Otherwise falling back to **embedded simplified** shapes.
+- For production, drop a full-precision GeoJSON at that path for accurate borders.")
 
 if __name__ == "__main__":
     main()
