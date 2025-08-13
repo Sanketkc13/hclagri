@@ -535,12 +535,12 @@ def main():
     if st.sidebar.button("📥 Generate Full Report"):
         report = df.describe().T
         st.sidebar.download_button(label="Download Summary Report", data=report.to_csv(), file_name="market_summary.csv", mime="text/csv")
-
+        
     # Helpful note for offline GeoJSON
-    with st.sidebar.expander("🗺️ Map Data Source"):
-        st.markdown("- Using **local** `./assets/nepal_provinces.geojson` if present.
+with st.sidebar.expander("🗺️ Map Data Source"):
+    st.markdown("""- Using **local** `./assets/nepal_provinces.geojson` if present.
 - Otherwise falling back to **embedded simplified** shapes.
-- For production, drop a full-precision GeoJSON at that path for accurate borders.")
+- For production, drop a full-precision GeoJSON at that path for accurate borders.""")
 
 if __name__ == "__main__":
     main()
