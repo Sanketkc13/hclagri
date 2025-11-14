@@ -11,13 +11,20 @@ import os
 # Configuration
 st.set_page_config(page_title="AgriPrice Analyzer", layout="wide")
 
-# Load initial data
 @st.cache_data
 def load_data(file_path='cleaned_dataset.csv'):
-    if os.path.exists(file_path):
+    # If user uploaded a file, it's a BytesIO object -> read directly
+    if hasattr(file_path, "read"):
         df = pd.read_csv(file_path)
         df['date'] = pd.to_datetime(df['date'])
         return df
+    
+    # If file_path is a string (default CSV)
+    if isinstance(file_path, str) and os.path.exists(file_path):
+        df = pd.read_csv(file_path)
+        df['date'] = pd.to_datetime(df['date'])
+        return df
+
     return pd.DataFrame()
 
 # Model training function
