@@ -8,26 +8,39 @@ from xgboost import XGBRegressor
 import datetime
 import os
 
-# Configuration
+# ---------------------------------------------------------
+# STREAMLIT CONFIGURATION
+# ---------------------------------------------------------
 st.set_page_config(page_title="AgriPrice Analyzer", layout="wide")
 
+# ---------------------------------------------------------
+# FIXED: LOAD DATA (WORKS WITH UPLOADED FILE OR LOCAL FILE)
+# ---------------------------------------------------------
 @st.cache_data
-def load_data(file_path='cleaned_dataset.csv'):
-    # If user uploaded a file, it's a BytesIO object -> read directly
-    if hasattr(file_path, "read"):
-        df = pd.read_csv(file_path)
-        df['date'] = pd.to_datetime(df['date'])
-        return df
-    
-    # If file_path is a string (default CSV)
-    if isinstance(file_path, str) and os.path.exists(file_path):
-        df = pd.read_csv(file_path)
-        df['date'] = pd.to_datetime(df['date'])
-        return df
+def load_data(file_source='cleaned_dataset.csv'):
+    try:
+        # Case 1: User uploaded a file (it has a .read attribute)
+        if hasattr(file_source, "read"):
+            df = pd.read_csv(file_source)
+            df['date'] = pd.to_datetime(df['date'])
+            return df
+        
+        # Case 2: file_source is a string path
+        if isinstance(file_source, str) and os.path.exists(file_source):
+            df = pd.read_csv(file_source)
+            df['date'] = pd.to_datetime(df['date'])
+            return df
+        
+        # Case 3: No file found
+        return pd.DataFrame()
 
-    return pd.DataFrame()
+    except Exception as e:
+        st.error(f"Error loading dataset: {e}")
+        return pd.DataFrame()
 
-# Model training function
+# ---------------------------------------------------------
+# TRAIN MODEL FUNCTION
+# ---------------------------------------------------------
 def train_model(df):
     try:
         df = df.copy()
@@ -38,13 +51,15 @@ def train_model(df):
         
         for col in categorical_cols:
             le = LabelEncoder()
-            df[col] = le.fit_transform(df[col])
+            df[col] = le.fit_transform(df[col].astype(str))
             le_dict[col] = le
         
         X = df[categorical_cols + ['rainfall_mm', 'temperature_c']]
         y = df['price_₹/ton']
         
-        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=0.2, random_state=42
+        )
         
         model = XGBRegressor()
         model.fit(X_train, y_train)
@@ -57,13 +72,18 @@ def train_model(df):
         st.error(f"Training failed: {str(e)}")
         return False
 
-# Main app
+# ---------------------------------------------------------
+# MAIN APP
+# ---------------------------------------------------------
 def main():
     st.title("Agricultural Market Price Analyzer 🌾")
     
-    # Sidebar controls
+    # ---------------- SIDEBAR: FILE UPLOAD ----------------
     st.sidebar.header("Data Management")
+
     uploaded_file = st.sidebar.file_uploader("Upload CSV Data", type=['csv'])
+
+    # Load Nepal dataset OR default dataset
     df = load_data(uploaded_file if uploaded_file else 'cleaned_dataset.csv')
     
     if not df.empty:
@@ -72,8 +92,10 @@ def main():
             with st.spinner("Training new model..."):
                 if train_model(df):
                     st.sidebar.success("Model updated successfully!")
-    
-    # Main tabs
+    else:
+        st.warning("No dataset available. Please upload a file.")
+
+    # ---------------- MAIN TABS ----------------
     tab1, tab2, tab3, tab4, tab5 = st.tabs([
         "📊 Real-Time Dashboard", 
         "📈 Historical Trends", 
@@ -82,8 +104,16 @@ def main():
         "🗺️ Regional Analysis"
     ])
 
-    with tab1:  # Real-Time Dashboard
+    # ---------------------------------------------------------
+    # TAB 1: REAL TIME DASHBOARD
+    # ---------------------------------------------------------
+    with tab1:
         st.header("Market Overview")
+
+        if df.empty:
+            st.warning("Upload a dataset to continue.")
+            return
+        
         col1, col2, col3 = st.columns(3)
         
         with col1:
@@ -105,81 +135,75 @@ def main():
         st.dataframe(df.sort_values('date', ascending=False).head(10), 
                     use_container_width=True)
 
-    with tab2:  # Historical Trends (Fixed)
+    # ---------------------------------------------------------
+    # TAB 2: HISTORICAL TRENDS
+    # ---------------------------------------------------------
+    with tab2:
         st.header("Historical Price Analysis")
         
-        # Initialize session state
-        if 'date_range' not in st.session_state:
-            st.session_state.date_range = [
-                df['date'].min().date(),
-                df['date'].max().date()
-            ]
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            crop_filter = st.selectbox("Select Crop", df['crop_type'].unique())
-        
-        with col2:
-            date_range = st.date_input(
-                "Select Date Range",
-                value=st.session_state.date_range,
-                min_value=df['date'].min().date(),
-                max_value=df['date'].max().date(),
-                key="date_range_selector"
-            )
-        
-        # Update session state
-        st.session_state.date_range = date_range
-        
-        filtered_df = df[
-            (df['crop_type'] == crop_filter) & 
-            (df['date'].between(pd.to_datetime(date_range[0]), 
-                              pd.to_datetime(date_range[1])))
-        ]
-        
-        if filtered_df.empty:
-            st.error("No data available for selected date range. Showing full historical trend.")
-            
-            col1, col2, col3 = st.columns([1,2,1])
-            with col2:
-                if st.button("Reset to Default Date Range"):
-                    st.session_state.date_range = [
-                        df['date'].min().date(),
-                        df['date'].max().date()
-                    ]
-                    st.experimental_rerun()
-            
-            filtered_df = df[df['crop_type'] == crop_filter]
-            fig = px.line(filtered_df, x='date', y='price_₹/ton', 
-                         title=f"{crop_filter} Full Price Trend")
+        if df.empty:
+            st.warning("Upload a dataset first.")
         else:
-            fig = px.line(filtered_df, x='date', y='price_₹/ton', 
-                         title=f"{crop_filter} Price Trend ({date_range[0]} to {date_range[1]})")
-        
-        st.plotly_chart(fig, use_container_width=True)
+            if 'date_range' not in st.session_state:
+                st.session_state.date_range = [
+                    df['date'].min().date(),
+                    df['date'].max().date()
+                ]
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                crop_filter = st.selectbox("Select Crop", df['crop_type'].unique())
+            
+            with col2:
+                date_range = st.date_input(
+                    "Select Date Range",
+                    value=st.session_state.date_range,
+                    min_value=df['date'].min().date(),
+                    max_value=df['date'].max().date(),
+                    key="date_selector"
+                )
+            
+            st.session_state.date_range = date_range
+            
+            filtered_df = df[
+                (df['crop_type'] == crop_filter) &
+                (df['date'].between(pd.to_datetime(date_range[0]), pd.to_datetime(date_range[1])))
+            ]
+            
+            if filtered_df.empty:
+                st.warning("No data in selected range — showing full trend.")
+                filtered_df = df[df['crop_type'] == crop_filter]
+            
+            fig = px.line(filtered_df, x='date', y='price_₹/ton',
+                          title=f"{crop_filter} Price Trend")
+            st.plotly_chart(fig, use_container_width=True)
 
-    with tab3:  # Weather Impact
+    # ---------------------------------------------------------
+    # TAB 3: WEATHER IMPACT
+    # ---------------------------------------------------------
+    with tab3:
         st.header("Climate Correlation Analysis")
-        
-        col1, col2 = st.columns(2)
-        with col1:
+
+        if df.empty:
+            st.warning("Upload a dataset first.")
+        else:
             weather_factor = st.selectbox("Select Weather Factor", 
                                         ['rainfall_mm', 'temperature_c'])
-        
-        try:
-            fig = px.scatter(df, x=weather_factor, y='price_₹/ton', 
-                            color='crop_type', trendline="ols",
-                            title=f"Price vs {weather_factor.replace('_', ' ').title()}")
+            fig = px.scatter(df, x=weather_factor, y='price_₹/ton',
+                             color='crop_type',
+                             trendline="ols",
+                             title=f"Price vs {weather_factor.title()}")
             st.plotly_chart(fig, use_container_width=True)
-        except ImportError:
-            st.error("Statsmodels required for trendlines. Install with: pip install statsmodels")
-        except Exception as e:
-            st.error(f"Error generating plot: {str(e)}")
 
-    with tab4:  # Price Prediction
+    # ---------------------------------------------------------
+    # TAB 4: PRICE PREDICTION
+    # ---------------------------------------------------------
+    with tab4:
         st.header("Price Prediction Model")
-        
-        if os.path.exists('model.pkl'):
+
+        if not os.path.exists('model.pkl'):
+            st.warning("Train the model first from sidebar.")
+        else:
             with open('model.pkl', 'rb') as f:
                 model_data = pickle.load(f)
             model, le_dict = model_data['model'], model_data['le_dict']
@@ -192,44 +216,44 @@ def main():
             
             with col2:
                 season = st.selectbox("Season", le_dict['season'].classes_)
-                
-                filtered_data = df[
-                    (df['state'] == state) & 
-                    (df['city'] == city) & 
+
+                filtered = df[
+                    (df['state'] == state) &
+                    (df['city'] == city) &
                     (df['season'] == season)
                 ]
                 
-                if not filtered_data.empty:
-                    avg_month = int(filtered_data['date'].dt.month.mode()[0])
-                    avg_rainfall = filtered_data['rainfall_mm'].mean()
-                    avg_temp = filtered_data['temperature_c'].mean()
+                if not filtered.empty:
+                    month = int(filtered['date'].dt.month.mode()[0])
+                    rainfall = filtered['rainfall_mm'].mean()
+                    temp = filtered['temperature_c'].mean()
                 else:
-                    avg_month = 6
-                    avg_rainfall = 100.0
-                    avg_temp = 25.0
+                    month = 6
+                    rainfall = 100 
+                    temp = 25
 
             if st.button("Predict Price"):
-                input_data = pd.DataFrame([[
-                    state, city, crop_type, season, avg_month, avg_rainfall, avg_temp
-                ]], columns=['state', 'city', 'crop_type', 'season', 
-                           'month', 'rainfall_mm', 'temperature_c'])
+                input_data = pd.DataFrame([[state, city, crop_type, season,
+                                            month, rainfall, temp]],
+                                          columns=['state','city','crop_type',
+                                                   'season','month',
+                                                   'rainfall_mm','temperature_c'])
                 
-                for col in ['state', 'city', 'crop_type', 'season', 'month']:
+                for col in ['state','city','crop_type','season','month']:
                     input_data[col] = le_dict[col].transform(input_data[col])
                 
-                prediction = model.predict(input_data)
-                st.success(f"Predicted Price: ₹{prediction[0]:.2f}/ton")
-                st.caption(f"Based on {state}'s {season} season averages: {avg_rainfall:.1f}mm rainfall, {avg_temp:.1f}°C")
-        else:
-            st.warning("No trained model found. Upload data and train model first.")
+                pred = model.predict(input_data)[0]
+                st.success(f"Predicted Price: ₹{pred:.2f}/ton")
 
-    with tab5:  # Regional Analysis
-        st.header("Geographical Price Distribution")
+    # ---------------------------------------------------------
+    # TAB 5: REGIONAL ANALYSIS (NEPAL MAP CAN BE ADDED IF YOU WANT)
+    # ---------------------------------------------------------
+    with tab5:
+        st.header("Regional Price Map (India)")
         
         try:
             india_geojson = "https://raw.githubusercontent.com/geohacker/india/master/state/india_state.geojson"
-            
-            avg_prices = df.groupby(['state', 'crop_type'])['price_₹/ton'].mean().reset_index()
+            avg_prices = df.groupby(['state'])['price_₹/ton'].mean().reset_index()
             
             fig = px.choropleth(
                 avg_prices,
@@ -237,29 +261,15 @@ def main():
                 locations="state",
                 featureidkey="properties.NAME_1",
                 color="price_₹/ton",
-                color_continuous_scale=px.colors.sequential.Plasma,
-                hover_name="state",
-                animation_frame="crop_type",
-                scope="asia",
-                title="India State-wise Price Variations"
+                color_continuous_scale="Plasma",
+                title="State-wise Price Distribution"
             )
-            
             fig.update_geos(fitbounds="locations", visible=False)
             st.plotly_chart(fig, use_container_width=True)
-            
+
         except Exception as e:
-            st.error(f"Map rendering error: {str(e)}")
+            st.error(f"Map Error: {e}")
 
-    # Report generation
-    st.sidebar.header("Report Generation")
-    if st.sidebar.button("📥 Generate Full Report"):
-        report = df.describe().T
-        st.sidebar.download_button(
-            label="Download Summary Report",
-            data=report.to_csv(),
-            file_name="market_summary.csv",
-            mime="text/csv"
-        )
-
+# ---------------------------------------------------------
 if __name__ == "__main__":
     main()
