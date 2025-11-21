@@ -24,10 +24,16 @@ warnings.filterwarnings("ignore")
 st.set_page_config(page_title="AgriPrice Analyzer", layout="wide")
 st.title("Agricultural Market Price Analyzer 🌾")
 
-DEFAULT_LOCAL_PATH = "/mnt/data/cleaned_dataset.csv"
+# Save uploads locally inside app folder to avoid /mnt permission issues
+DEFAULT_LOCAL_DIR = "uploaded_files"
+DEFAULT_LOCAL_PATH = os.path.join(DEFAULT_LOCAL_DIR, "cleaned_dataset.csv")
+
 NEPAL_GEOJSON_LOCAL = "assets/nepal_provinces.geojson"  # local preferred
 NEPAL_GEOJSON_REMOTE = "https://raw.githubusercontent.com/sandeshchapagain/nepal-geojson/main/nepal-provinces.geojson"
 INDIA_GEOJSON_REMOTE = "https://raw.githubusercontent.com/geohacker/india/master/state/india_state.geojson"
+
+# Ensure upload dir exists
+os.makedirs(DEFAULT_LOCAL_DIR, exist_ok=True)
 
 # -----------------------
 # Utility: column detection & normalization
@@ -90,9 +96,8 @@ def detect_and_standardize(df: pd.DataFrame) -> pd.DataFrame:
         else:
             df[c] = df[c].fillna(df[c].mean())
 
-    # price column: if not found, create and fill 0 (but training requires price)
+    # price column: if not found, create and fill NaN (training will require real values)
     if "price" not in df.columns:
-        # try to detect alternative price-like column name (rare)
         found = None
         for c in cols:
             if "price" in c.lower():
@@ -130,7 +135,6 @@ def load_data(file_obj=None):
             elif isinstance(file_obj, str) and os.path.exists(file_obj):
                 df = pd.read_csv(file_obj)
             else:
-                # attempt to read from file-like string
                 try:
                     df = pd.read_csv(io.StringIO(file_obj.decode("utf-8")))
                 except Exception:
@@ -160,6 +164,7 @@ def build_pipelines(cat_cols, num_cols):
                                        n_estimators=300, learning_rate=0.05, max_depth=6,
                                        subsample=0.85, colsample_bytree=0.85,
                                        reg_alpha=0.5, reg_lambda=1.0,
+                                       enable_categorical=True,
                                        random_state=42, n_jobs=-1))
         ]),
         "Random Forest": Pipeline([
@@ -194,6 +199,10 @@ def train_and_save(df, model_choice="XGBoost", do_xgb_search=False, xgb_iter=12)
     X = df2[feature_cols]
     y = df2["price"].astype(float)
 
+    # Make sure categories are strings (OneHotEncoder expects strings)
+    for c in cat_cols:
+        X[c] = X[c].astype(str)
+
     # train/test split
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
@@ -201,19 +210,22 @@ def train_and_save(df, model_choice="XGBoost", do_xgb_search=False, xgb_iter=12)
     pipelines = build_pipelines(cat_cols, num_cols)
     pipeline = pipelines[model_choice]
 
+    # Fixed static iterations if search enabled (12)
     if model_choice == "XGBoost" and do_xgb_search:
         st.info("Running RandomizedSearchCV for XGBoost (this might take a while)...")
         param_dist = {
-            "regressor__n_estimators": [100, 200, 300, 400],
-            "regressor__learning_rate": [0.01, 0.03, 0.05, 0.08],
-            "regressor__max_depth": [3, 5, 6, 8],
-            "regressor__subsample": [0.6, 0.75, 0.85, 1.0],
-            "regressor__colsample_bytree": [0.6, 0.75, 0.85, 1.0],
+            "regressor__n_estimators": [150, 200, 300],
+            "regressor__learning_rate": [0.01, 0.03, 0.05],
+            "regressor__max_depth": [3, 5, 6],
+            "regressor__subsample": [0.6, 0.8, 0.9],
+            "regressor__colsample_bytree": [0.6, 0.8, 0.9],
             "regressor__reg_alpha": [0, 0.1, 0.5],
             "regressor__reg_lambda": [0.5, 1.0, 2.0]
         }
+        # fixed number of iterations to keep results consistent
+        n_iter_fixed = 12
         search = RandomizedSearchCV(pipeline, param_distributions=param_dist,
-                                    n_iter=max(6, min(xgb_iter, 40)), scoring="neg_mean_absolute_error",
+                                    n_iter=n_iter_fixed, scoring="neg_mean_absolute_error",
                                     cv=3, random_state=42, n_jobs=-1, verbose=0)
         search.fit(X_train, y_train)
         pipeline = search.best_estimator_
@@ -222,7 +234,6 @@ def train_and_save(df, model_choice="XGBoost", do_xgb_search=False, xgb_iter=12)
 
     # For XGBoost, fit with early stopping using pipeline.fit with fit params
     if model_choice == "XGBoost":
-        # provide eval_set via pipeline fit params (prefixed by regressor__)
         pipeline.fit(X_train, y_train,
                      regressor__eval_set=[(X_test, y_test)],
                      regressor__early_stopping_rounds=30,
@@ -239,18 +250,13 @@ def train_and_save(df, model_choice="XGBoost", do_xgb_search=False, xgb_iter=12)
     feat_importance = None
     if model_choice in ("XGBoost", "Random Forest"):
         try:
-            # build feature names after preprocessing
-            # use pipeline.named_steps['preprocessor'] to get output feature names (sklearn >=1.0)
             pre = pipeline.named_steps['preprocessor']
-            # After OneHotEncoder+sparse=False, feature names are available via get_feature_names_out
             try:
                 cat_names = pre.named_transformers_['cat'].get_feature_names_out(cat_cols)
             except Exception:
-                # fallback
                 cat_names = [f"{c}__{i}" for c in cat_cols]
             num_names = num_cols
             feature_names = list(cat_names) + list(num_names)
-            # get regressor feature importance
             reg = pipeline.named_steps['regressor']
             if hasattr(reg, "feature_importances_"):
                 imp = reg.feature_importances_
@@ -344,13 +350,13 @@ JUST = {
 def main():
     st.sidebar.header("Data & Training Controls")
 
-    uploaded = st.sidebar.file_uploader("Upload CSV (optional). If uploaded it will be saved to the default path.", type=["csv"])
+    uploaded = st.sidebar.file_uploader("Upload CSV (optional). If uploaded it will be saved to the app folder.", type=["csv"])
     # if upload provided, save to DEFAULT_LOCAL_PATH so subsequent runs use it automatically
     if uploaded is not None:
         try:
-            # save uploaded file to default path for persistence
+            # save uploaded file to default path for persistence inside app folder
             bytes_data = uploaded.getvalue()
-            os.makedirs(os.path.dirname(DEFAULT_LOCAL_PATH), exist_ok=True)
+            os.makedirs(DEFAULT_LOCAL_DIR, exist_ok=True)
             with open(DEFAULT_LOCAL_PATH, "wb") as f:
                 f.write(bytes_data)
             st.sidebar.success(f"Uploaded and saved to {DEFAULT_LOCAL_PATH}")
@@ -362,7 +368,7 @@ def main():
         df_raw = load_data(None)
 
     if df_raw.empty:
-        st.warning("No data found — upload a CSV or place 'cleaned_dataset.csv' at the default path.")
+        st.warning("No data found — upload a CSV or place 'cleaned_dataset.csv' at the app folder or the default path.")
         st.stop()
 
     # standardize columns & fill
@@ -381,16 +387,13 @@ def main():
     model_choice = st.sidebar.selectbox("Model", ["XGBoost", "Random Forest", "Linear Regression"])
     st.sidebar.info(JUST[model_choice])
     do_xgb_search = False
-    xgb_iter = 12
     if model_choice == "XGBoost":
         do_xgb_search = st.sidebar.checkbox("Enable XGBoost RandomizedSearchCV (optional, slower)", value=False)
-        if do_xgb_search:
-            xgb_iter = st.sidebar.number_input("Search iterations", min_value=4, max_value=40, value=12, step=2)
 
     if st.sidebar.button("Train & Save Model"):
         try:
             with st.spinner("Training — this may take some time"):
-                perf = train_and_save(df, model_choice, do_xgb_search, xgb_iter)
+                perf = train_and_save(df, model_choice, do_xgb_search, xgb_iter=12)
             st.sidebar.success(f"Trained {model_choice} — MAE: {perf['MAE']:.2f}, R²: {perf['R2']:.3f}")
             if perf.get("rf_stats"):
                 st.sidebar.write("RF stats:", perf["rf_stats"])
