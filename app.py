@@ -2,11 +2,14 @@
 import os
 import io
 import pickle
+import json
 import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
-from sklearn.preprocessing import LabelEncoder
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.pipeline import Pipeline
 from sklearn.model_selection import train_test_split, RandomizedSearchCV
 from sklearn.linear_model import LinearRegression
 from sklearn.ensemble import RandomForestRegressor
@@ -15,83 +18,104 @@ from sklearn.metrics import mean_absolute_error, r2_score
 import warnings
 warnings.filterwarnings("ignore")
 
-# -------------------------
-# App config
-# -------------------------
+# -----------------------
+# Configuration
+# -----------------------
 st.set_page_config(page_title="AgriPrice Analyzer", layout="wide")
 st.title("Agricultural Market Price Analyzer 🌾")
 
-# Default local path (from your previous sessions / uploads)
 DEFAULT_LOCAL_PATH = "/mnt/data/cleaned_dataset.csv"
+NEPAL_GEOJSON_LOCAL = "assets/nepal_provinces.geojson"  # local preferred
+NEPAL_GEOJSON_REMOTE = "https://raw.githubusercontent.com/sandeshchapagain/nepal-geojson/main/nepal-provinces.geojson"
+INDIA_GEOJSON_REMOTE = "https://raw.githubusercontent.com/geohacker/india/master/state/india_state.geojson"
 
-# -------------------------
-# Utility functions (column detection + normalization)
-# -------------------------
-def detect_price_column(cols):
-    for c in cols:
-        if 'price' in c.lower():
-            return c
-    return None
-
-def detect_supply_column(cols):
-    for c in cols:
-        if c.lower().startswith('supply'):
-            return c
-    return None
-
-def detect_demand_column(cols):
-    for c in cols:
-        if c.lower().startswith('demand'):
-            return c
-    return None
-
-def standardize_dataframe(df):
+# -----------------------
+# Utility: column detection & normalization
+# -----------------------
+def detect_and_standardize(df: pd.DataFrame) -> pd.DataFrame:
+    """Detect price/supply/demand and normalize column names to internal schema.
+       Ensures required columns exist (fill/make reasonable defaults).
+    """
     df = df.copy()
-    cols = df.columns.tolist()
-    price_col = detect_price_column(cols)
-    supply_col = detect_supply_column(cols)
-    demand_col = detect_demand_column(cols)
+    cols = list(df.columns)
 
+    # mapping heuristics
     mapping = {}
-    if 'date' in cols:
-        mapping['date'] = 'date'
-    if 'state' in cols:
-        mapping['state'] = 'state'
-    if 'city' in cols:
-        mapping['city'] = 'city'
-    if 'crop_type' in cols:
-        mapping['crop_type'] = 'crop_type'
-    if 'season' in cols:
-        mapping['season'] = 'season'
-    if 'rainfall_mm' in cols:
-        mapping['rainfall_mm'] = 'rainfall_mm'
-    if 'temperature_c' in cols:
-        mapping['temperature_c'] = 'temperature_c'
-    if price_col:
-        mapping[price_col] = 'price'
-    if supply_col:
-        mapping[supply_col] = 'supply_volume_tons'
-    if demand_col:
-        mapping[demand_col] = 'demand_volume_tons'
+    for c in cols:
+        cl = c.lower()
+        if "price" in cl:
+            mapping[c] = "price"
+        if cl in ("state", "province", "region"):
+            mapping[c] = "state"
+        if cl in ("city", "district", "municipality"):
+            mapping[c] = "city"
+        if "crop" in cl:
+            mapping[c] = "crop_type"
+        if "season" in cl:
+            mapping[c] = "season"
+        if "rain" in cl:
+            mapping[c] = "rainfall_mm"
+        if "temp" in cl or "temperature" in cl:
+            mapping[c] = "temperature_c"
+        if cl.startswith("supply"):
+            mapping[c] = "supply_volume_tons"
+        if cl.startswith("demand"):
+            mapping[c] = "demand_volume_tons"
+        if cl in ("date",):
+            mapping[c] = "date"
 
     df = df.rename(columns=mapping)
-    return df, {'price_col': price_col, 'supply_col': supply_col, 'demand_col': demand_col, 'mapping': mapping}
 
-# -------------------------
-# Robust load_data: handles uploaded file-like OR local path
-# -------------------------
+    # ensure date exists
+    if "date" in df.columns:
+        df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    else:
+        # create dummy date if missing
+        df["date"] = pd.to_datetime("2020-01-01")
+
+    # required categorical columns - create if missing
+    for c in ["state", "city", "crop_type", "season"]:
+        if c not in df.columns:
+            df[c] = "Unknown"
+        df[c] = df[c].astype(str).fillna("Unknown")
+
+    # ensure numeric columns exist and are numeric
+    for c in ["rainfall_mm", "temperature_c", "supply_volume_tons", "demand_volume_tons"]:
+        if c not in df.columns:
+            df[c] = np.nan
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+        # fill missing with mean if available else zero
+        if df[c].isna().all():
+            df[c] = 0.0
+        else:
+            df[c] = df[c].fillna(df[c].mean())
+
+    # price column: if not found, create and fill 0 (but training requires price)
+    if "price" not in df.columns:
+        # try to detect alternative price-like column name (rare)
+        found = None
+        for c in cols:
+            if "price" in c.lower():
+                found = c
+                break
+        if found:
+            df = df.rename(columns={found: "price"})
+        else:
+            df["price"] = np.nan
+
+    # add month column for convenience
+    if "month" not in df.columns:
+        df["month"] = df["date"].dt.month.fillna(6).astype(int)
+
+    return df
+
+# -----------------------
+# Robust loader (uploaded file or default local)
+# -----------------------
 @st.cache_data
-def load_data(file_source=None):
-    """
-    file_source can be:
-      - a Streamlit uploaded file object (has .read)
-      - a filepath string
-      - None -> attempts DEFAULT_LOCAL_PATH
-    Returns DataFrame or empty df on error.
-    """
+def load_data(file_obj=None):
     try:
-        if file_source is None:
-            # prefer the explicit default path if exists, otherwise try cleaned_dataset.csv in cwd
+        if file_obj is None:
             if os.path.exists(DEFAULT_LOCAL_PATH):
                 df = pd.read_csv(DEFAULT_LOCAL_PATH)
             elif os.path.exists("cleaned_dataset.csv"):
@@ -99,324 +123,308 @@ def load_data(file_source=None):
             else:
                 return pd.DataFrame()
         else:
-            # uploaded file-like object (BytesIO / SpooledTemporaryFile)
-            if hasattr(file_source, "read"):
-                # read into pandas directly
-                file_source.seek(0)
-                df = pd.read_csv(file_source)
-            elif isinstance(file_source, str):
-                df = pd.read_csv(file_source)
+            # file_obj may be UploadedFile or path string
+            if hasattr(file_obj, "read"):
+                file_obj.seek(0)
+                df = pd.read_csv(file_obj)
+            elif isinstance(file_obj, str) and os.path.exists(file_obj):
+                df = pd.read_csv(file_obj)
             else:
-                # fallback: try to convert to bytes
-                df = pd.read_csv(io.StringIO(file_source.decode('utf-8')))
-
-        # try to parse date if present
-        if 'date' in df.columns:
-            df['date'] = pd.to_datetime(df['date'], errors='coerce')
-
-        # auto-rename price-like column to 'price' to avoid encoding issues
-        for c in df.columns:
-            if 'price' in c.lower() and c != 'price':
-                df.rename(columns={c: 'price'}, inplace=True)
-                break
-
-        # If price column still not normalized but a price-like exists, it is handled above.
+                # attempt to read from file-like string
+                try:
+                    df = pd.read_csv(io.StringIO(file_obj.decode("utf-8")))
+                except Exception:
+                    return pd.DataFrame()
         return df
     except Exception as e:
-        st.error(f"Error loading CSV: {e}")
+        st.error(f"Failed to load CSV: {e}")
         return pd.DataFrame()
 
-# -------------------------
-# LabelEncoder helpers
-# -------------------------
-def fit_label_encoders(df, cat_cols):
-    le_dict = {}
-    for c in cat_cols:
-        le = LabelEncoder()
-        arr = df[c].astype(str).fillna("___NA___")
-        le.fit(arr)
-        le_dict[c] = le
-    return le_dict
+# -----------------------
+# Build preprocess + model pipelines
+# -----------------------
+def build_pipelines(cat_cols, num_cols):
+    preprocessor = ColumnTransformer(
+        transformers=[
+            ("cat", OneHotEncoder(handle_unknown="ignore", sparse=False), cat_cols),
+            ("num", StandardScaler(), num_cols)
+        ],
+        remainder="drop",
+        verbose_feature_names_out=False
+    )
 
-# -------------------------
-# Train function: improved XGBoost tuning + early stopping
-# -------------------------
-def train_and_save(df, model_choice, do_xgb_search=False, xgb_search_iters=12):
-    required = {'state','city','crop_type','season','rainfall_mm','temperature_c',
-                'supply_volume_tons','demand_volume_tons','price','date'}
-    if not required.issubset(set(df.columns)):
-        missing = required - set(df.columns)
-        raise ValueError(f"Dataset missing required columns (after normalization): {missing}")
+    pipelines = {
+        "XGBoost": Pipeline([
+            ("preprocessor", preprocessor),
+            ("regressor", XGBRegressor(objective="reg:squarederror",
+                                       n_estimators=300, learning_rate=0.05, max_depth=6,
+                                       subsample=0.85, colsample_bytree=0.85,
+                                       reg_alpha=0.5, reg_lambda=1.0,
+                                       random_state=42, n_jobs=-1))
+        ]),
+        "Random Forest": Pipeline([
+            ("preprocessor", preprocessor),
+            ("regressor", RandomForestRegressor(n_estimators=400, max_depth=18,
+                                               min_samples_split=4, min_samples_leaf=2,
+                                               n_jobs=-1, random_state=42))
+        ]),
+        "Linear Regression": Pipeline([
+            ("preprocessor", preprocessor),
+            ("regressor", LinearRegression())
+        ])
+    }
+    return pipelines
 
-    # copy and prepare
-    df2 = df.copy()
-    df2['month'] = df2['date'].dt.month.fillna(6).astype(int)
+# -----------------------
+# Train (with optional XGB randomized search + early stopping)
+# -----------------------
+def train_and_save(df, model_choice="XGBoost", do_xgb_search=False, xgb_iter=12):
+    # require a price column to train
+    if "price" not in df.columns or df["price"].isna().all():
+        raise ValueError("No valid 'price' column present in dataset for training.")
 
-    cat_cols = ['state','city','crop_type','season','month']
-    num_cols = ['rainfall_mm','temperature_c','supply_volume_tons','demand_volume_tons']
+    # define columns
+    cat_cols = ["state", "city", "crop_type", "season", "month"]
+    num_cols = ["rainfall_mm", "temperature_c", "supply_volume_tons", "demand_volume_tons"]
     feature_cols = cat_cols + num_cols
 
-    # fit label encoders
-    df_cat = df2[cat_cols].astype(str).fillna("___NA___")
-    le_dict = fit_label_encoders(df_cat, cat_cols)
+    # prepare X,y
+    df2 = df.copy()
+    df2["month"] = df2["date"].dt.month.fillna(6).astype(int)
+    X = df2[feature_cols]
+    y = df2["price"].astype(float)
 
-    # encode X
-    X_enc = pd.DataFrame()
-    for c in cat_cols:
-        X_enc[c] = le_dict[c].transform(df_cat[c])
-    for c in num_cols:
-        X_enc[c] = pd.to_numeric(df2[c], errors='coerce').fillna(df2[c].mean())
+    # train/test split
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
-    y = pd.to_numeric(df2['price'], errors='coerce').fillna(0)
+    # build pipelines
+    pipelines = build_pipelines(cat_cols, num_cols)
+    pipeline = pipelines[model_choice]
 
-    # split
-    X_train, X_test, y_train, y_test = train_test_split(X_enc, y, test_size=0.2, random_state=42)
-
-    # Choose base model
-    if model_choice == "Linear Regression":
-        model = LinearRegression()
-        model_path = "models/lr_model.pkl"
-    elif model_choice == "Random Forest":
-        model = RandomForestRegressor(n_estimators=200, max_depth=None, n_jobs=-1, random_state=42)
-        model_path = "models/rf_model.pkl"
-    else:  # XGBoost default with improved params
-        model = XGBRegressor(objective='reg:squarederror',
-                             n_estimators=500,     # higher base so early stopping can reduce it
-                             learning_rate=0.05,
-                             max_depth=6,
-                             subsample=0.8,
-                             colsample_bytree=0.8,
-                             reg_alpha=0.5,
-                             reg_lambda=1.0,
-                             random_state=42,
-                             n_jobs=-1)
-        model_path = "models/xgb_model.pkl"
-
-    # Optionally run a randomized search for xgboost to boost accuracy
     if model_choice == "XGBoost" and do_xgb_search:
-        st.info("Running randomized search for XGBoost (this may take some time)...")
+        st.info("Running RandomizedSearchCV for XGBoost (this might take a while)...")
         param_dist = {
-            'n_estimators': [100, 200, 300, 500],
-            'learning_rate': [0.01, 0.03, 0.05, 0.08],
-            'max_depth': [3, 4, 6, 8],
-            'subsample': [0.6, 0.75, 0.85, 1.0],
-            'colsample_bytree': [0.6, 0.75, 0.85, 1.0],
-            'reg_alpha': [0, 0.1, 0.5, 1],
-            'reg_lambda': [0.5, 1.0, 2.0]
+            "regressor__n_estimators": [100, 200, 300, 400],
+            "regressor__learning_rate": [0.01, 0.03, 0.05, 0.08],
+            "regressor__max_depth": [3, 5, 6, 8],
+            "regressor__subsample": [0.6, 0.75, 0.85, 1.0],
+            "regressor__colsample_bytree": [0.6, 0.75, 0.85, 1.0],
+            "regressor__reg_alpha": [0, 0.1, 0.5],
+            "regressor__reg_lambda": [0.5, 1.0, 2.0]
         }
-        search = RandomizedSearchCV(
-            estimator=model,
-            param_distributions=param_dist,
-            n_iter=min(xgb_search_iters, 40),
-            scoring='neg_mean_absolute_error',
-            cv=3,
-            random_state=42,
-            n_jobs=-1,
-            verbose=0
-        )
+        search = RandomizedSearchCV(pipeline, param_distributions=param_dist,
+                                    n_iter=max(6, min(xgb_iter, 40)), scoring="neg_mean_absolute_error",
+                                    cv=3, random_state=42, n_jobs=-1, verbose=0)
         search.fit(X_train, y_train)
-        model = search.best_estimator_
-        st.success(f"RandomizedSearch best score (neg MAE): {search.best_score_:.3f}")
-        st.write("Best params (XGBoost):", search.best_params_)
+        pipeline = search.best_estimator_
+        st.success("RandomizedSearchCV complete.")
+        st.write("Best params (XGBoost pipeline):", search.best_params_)
 
-    # Fit model:
-    # For XGBoost, use eval_set and early_stopping_rounds to avoid overfitting
-    if isinstance(model, XGBRegressor):
-        model.fit(X_train, y_train,
-                  eval_set=[(X_test, y_test)],
-                  early_stopping_rounds=30,
-                  verbose=False)
+    # For XGBoost, fit with early stopping using pipeline.fit with fit params
+    if model_choice == "XGBoost":
+        # provide eval_set via pipeline fit params (prefixed by regressor__)
+        pipeline.fit(X_train, y_train,
+                     regressor__eval_set=[(X_test, y_test)],
+                     regressor__early_stopping_rounds=30,
+                     regressor__verbose=False)
     else:
-        model.fit(X_train, y_train)
+        pipeline.fit(X_train, y_train)
 
-    # Evaluate
-    preds = model.predict(X_test)
+    # evaluate
+    preds = pipeline.predict(X_test)
     mae = mean_absolute_error(y_test, preds)
     r2 = r2_score(y_test, preds)
 
-    # Save payload
+    # feature importance if available (for tree models)
+    feat_importance = None
+    if model_choice in ("XGBoost", "Random Forest"):
+        try:
+            # build feature names after preprocessing
+            # use pipeline.named_steps['preprocessor'] to get output feature names (sklearn >=1.0)
+            pre = pipeline.named_steps['preprocessor']
+            # After OneHotEncoder+sparse=False, feature names are available via get_feature_names_out
+            try:
+                cat_names = pre.named_transformers_['cat'].get_feature_names_out(cat_cols)
+            except Exception:
+                # fallback
+                cat_names = [f"{c}__{i}" for c in cat_cols]
+            num_names = num_cols
+            feature_names = list(cat_names) + list(num_names)
+            # get regressor feature importance
+            reg = pipeline.named_steps['regressor']
+            if hasattr(reg, "feature_importances_"):
+                imp = reg.feature_importances_
+                feat_importance = pd.DataFrame({"feature": feature_names[:len(imp)], "importance": imp}).sort_values("importance", ascending=False)
+        except Exception:
+            feat_importance = None
+
+    # Save pipeline payload
     payload = {
-        'model': model,
-        'le_dict': le_dict,
-        'feature_cols': feature_cols,
-        'model_choice': model_choice,
+        "pipeline": pipeline,
+        "feature_cols": feature_cols,
+        "cat_cols": cat_cols,
+        "num_cols": num_cols,
+        "model_choice": model_choice
     }
     os.makedirs("models", exist_ok=True)
     with open("model.pkl", "wb") as f:
         pickle.dump(payload, f)
-    with open(model_path, "wb") as f:
+    with open(os.path.join("models", f"{model_choice.lower().replace(' ','_')}_pipeline.pkl"), "wb") as f:
         pickle.dump(payload, f)
 
-    # If Random Forest, compute node stats
-    rf_node_stats = None
+    # RF node stats if applicable
+    rf_stats = None
     if model_choice == "Random Forest":
         try:
-            # sklearn RandomForest has estimators_ attribute (list of DecisionTreeClassifier)
-            total_nodes = 0
-            for est in model.estimators_:
-                total_nodes += est.tree_.node_count
-            n_trees = len(model.estimators_)
-            avg_nodes = total_nodes / n_trees if n_trees > 0 else 0
-            rf_node_stats = {'n_trees': n_trees, 'total_nodes': int(total_nodes), 'avg_nodes': int(avg_nodes)}
+            rf = pipeline.named_steps['regressor']
+            total_nodes = sum([est.tree_.node_count for est in rf.estimators_])
+            n_trees = len(rf.estimators_)
+            avg_nodes = int(total_nodes / n_trees) if n_trees else 0
+            rf_stats = {"n_trees": n_trees, "total_nodes": int(total_nodes), "avg_nodes": avg_nodes}
         except Exception:
-            rf_node_stats = None
+            rf_stats = None
 
-    return {'MAE': float(mae), 'R2': float(r2), 'rf_node_stats': rf_node_stats}
+    return {"MAE": float(mae), "R2": float(r2), "feat_importance": feat_importance, "rf_stats": rf_stats}
 
-# -------------------------
-# Prepare encoded single input row (auto-fill)
-# -------------------------
-def prepare_input_row(df, le_dict, feature_cols, state, city, crop_type, season):
-    df2 = df.copy()
-    if 'date' in df2.columns and 'month' not in df2.columns:
-        df2['month'] = df2['date'].dt.month.fillna(6).astype(int)
-
+# -----------------------
+# Prepare single-row input for prediction (auto-fill)
+# -----------------------
+def prepare_input_row_for_pipeline(df_original, state, city, crop, season, month=None, rainfall=None, temp=None, supply=None, demand=None):
+    df2 = df_original.copy()
+    if month is None:
+        if "date" in df2.columns:
+            month = int(df2['date'].dt.month.mode()[0])
+        else:
+            month = 6
+    # select subset for that location to compute averages
     subset = df2[
         (df2['state'].astype(str) == str(state)) &
         (df2['city'].astype(str) == str(city)) &
-        (df2['crop_type'].astype(str) == str(crop_type)) &
+        (df2['crop_type'].astype(str) == str(crop)) &
         (df2['season'].astype(str) == str(season))
     ]
-
-    if not subset.empty:
-        month_val = int(subset['date'].dt.month.mode()[0]) if 'date' in subset.columns else int(subset['month'].mode()[0])
-        rainfall_val = float(subset['rainfall_mm'].mean())
-        temp_val = float(subset['temperature_c'].mean())
-        supply_val = float(subset['supply_volume_tons'].mean()) if 'supply_volume_tons' in subset.columns else float(df2['supply_volume_tons'].mean())
-        demand_val = float(subset['demand_volume_tons'].mean()) if 'demand_volume_tons' in subset.columns else float(df2['demand_volume_tons'].mean())
+    if subset.shape[0] > 0:
+        rainfall = float(subset['rainfall_mm'].mean()) if rainfall is None else rainfall
+        temp = float(subset['temperature_c'].mean()) if temp is None else temp
+        supply = float(subset['supply_volume_tons'].mean()) if supply is None else supply
+        demand = float(subset['demand_volume_tons'].mean()) if demand is None else demand
     else:
-        month_val = int(df2['date'].dt.month.mode()[0]) if 'date' in df2.columns else 6
-        rainfall_val = float(df2['rainfall_mm'].mean())
-        temp_val = float(df2['temperature_c'].mean())
-        supply_val = float(df2['supply_volume_tons'].mean()) if 'supply_volume_tons' in df2.columns else 0.0
-        demand_val = float(df2['demand_volume_tons'].mean()) if 'demand_volume_tons' in df2.columns else 0.0
+        # fallback to dataset means
+        rainfall = float(df2['rainfall_mm'].mean()) if rainfall is None else rainfall
+        temp = float(df2['temperature_c'].mean()) if temp is None else temp
+        supply = float(df2['supply_volume_tons'].mean()) if supply is None else supply
+        demand = float(df2['demand_volume_tons'].mean()) if demand is None else demand
 
-    raw = {
-        'state': str(state),
-        'city': str(city),
-        'crop_type': str(crop_type),
-        'season': str(season),
-        'month': int(month_val),
-        'rainfall_mm': float(rainfall_val),
-        'temperature_c': float(temp_val),
-        'supply_volume_tons': float(supply_val),
-        'demand_volume_tons': float(demand_val)
+    row = {
+        "state": str(state),
+        "city": str(city),
+        "crop_type": str(crop),
+        "season": str(season),
+        "month": int(month),
+        "rainfall_mm": float(rainfall),
+        "temperature_c": float(temp),
+        "supply_volume_tons": float(supply),
+        "demand_volume_tons": float(demand)
     }
+    X_row = pd.DataFrame([row])
+    return X_row, row
 
-    encoded = []
-    for col in feature_cols:
-        if col in ['rainfall_mm','temperature_c','supply_volume_tons','demand_volume_tons']:
-            encoded.append(raw[col])
-        else:
-            le = le_dict.get(col)
-            if le is None:
-                encoded.append(0)
-            else:
-                try:
-                    transformed = le.transform([raw[col]])[0]
-                except Exception:
-                    classes = list(le.classes_)
-                    if "___NA___" in classes:
-                        transformed = int(np.where(np.array(classes) == "___NA___")[0][0])
-                    else:
-                        transformed = 0
-                encoded.append(transformed)
-
-    X_row = pd.DataFrame([encoded], columns=feature_cols)
-    return X_row, raw
-
-# -------------------------
-# Justifications text
-# -------------------------
+# -----------------------
+# Justifications
+# -----------------------
 JUST = {
-    "Linear Regression": "Fast baseline, easy to interpret. Use for quick checks and comparisons.",
-    "Random Forest": "Robust ensemble that captures non-linear relationships with little tuning.",
-    "XGBoost": "High-performance gradient boosting; tuned + early stopping gives strong accuracy for tabular data."
+    "Linear Regression": "Baseline, interpretable — good for quick checks and simple linear relationships.",
+    "Random Forest": "Robust ensemble capturing non-linear interactions; less sensitive to outliers.",
+    "XGBoost": "High-performance gradient boosting with regularization and early stopping — strong for tabular data."
 }
 
-# -------------------------
+# -----------------------
 # MAIN app UI
-# -------------------------
+# -----------------------
 def main():
-    st.sidebar.header("Data & Model Controls")
+    st.sidebar.header("Data & Training Controls")
 
-    # file uploader: handle buffer and local path fallback
-    uploaded = st.sidebar.file_uploader("Upload CSV (or leave to use local cleaned_dataset.csv)", type=['csv'])
-    # if user uploaded, pass the uploaded file object; otherwise fallback to default path
-    df_raw = load_data(uploaded if uploaded else None)
+    uploaded = st.sidebar.file_uploader("Upload CSV (optional). If uploaded it will be saved to the default path.", type=["csv"])
+    # if upload provided, save to DEFAULT_LOCAL_PATH so subsequent runs use it automatically
+    if uploaded is not None:
+        try:
+            # save uploaded file to default path for persistence
+            bytes_data = uploaded.getvalue()
+            os.makedirs(os.path.dirname(DEFAULT_LOCAL_PATH), exist_ok=True)
+            with open(DEFAULT_LOCAL_PATH, "wb") as f:
+                f.write(bytes_data)
+            st.sidebar.success(f"Uploaded and saved to {DEFAULT_LOCAL_PATH}")
+            df_raw = load_data(DEFAULT_LOCAL_PATH)
+        except Exception as e:
+            st.sidebar.error(f"Failed to save uploaded file: {e}")
+            df_raw = load_data(uploaded)
+    else:
+        df_raw = load_data(None)
 
     if df_raw.empty:
         st.warning("No data found — upload a CSV or place 'cleaned_dataset.csv' at the default path.")
-        return
+        st.stop()
 
-    # Normalize columns
-    df, detect_info = standardize_dataframe(df_raw)
+    # standardize columns & fill
+    df = detect_and_standardize(df_raw)
 
     st.sidebar.success(f"Loaded dataset ({len(df):,} rows)")
-    # check core fields
-    core_fields = {'date','state','city','crop_type','season','rainfall_mm','temperature_c','price'}
-    missing_core = core_fields - set(df.columns)
-    if missing_core:
-        st.sidebar.error(f"Missing required columns (after auto-detection): {missing_core}")
-        st.sidebar.info("Ensure your CSV contains date, state, city, crop_type, season, rainfall_mm, temperature_c, supply_volume_tons, demand_volume_tons and a price column.")
-        # we allow display but training/prediction will be blocked
 
-    # Model selection
-    st.sidebar.markdown("### Choose algorithm to train")
+    # check that price exists for training
+    if "price" not in df.columns or df["price"].isna().all():
+        st.sidebar.error("No valid 'price' column detected. Training and prediction require a numeric price column.")
+    else:
+        st.sidebar.info("Price column detected and ready.")
+
+    # Model controls
+    st.sidebar.markdown("### Choose model to train")
     model_choice = st.sidebar.selectbox("Model", ["XGBoost", "Random Forest", "Linear Regression"])
     st.sidebar.info(JUST[model_choice])
-
     do_xgb_search = False
     xgb_iter = 12
     if model_choice == "XGBoost":
-        do_xgb_search = st.sidebar.checkbox("Enable quick XGBoost RandomizedSearchCV (improves accuracy, slower)", value=False)
+        do_xgb_search = st.sidebar.checkbox("Enable XGBoost RandomizedSearchCV (optional, slower)", value=False)
         if do_xgb_search:
-            xgb_iter = st.sidebar.number_input("XGBoost random search iterations", min_value=4, max_value=40, value=12, step=2)
+            xgb_iter = st.sidebar.number_input("Search iterations", min_value=4, max_value=40, value=12, step=2)
 
     if st.sidebar.button("Train & Save Model"):
-        if missing_core:
-            st.sidebar.error("Cannot train: dataset missing required columns.")
-        else:
-            with st.spinner("Training model... this can take some time for tuning"):
-                try:
-                    perf = train_and_save(df, model_choice, do_xgb_search, xgb_iter)
-                    st.sidebar.success(f"Trained {model_choice} — MAE: {perf['MAE']:.2f}, R²: {perf['R2']:.3f}")
-                    if perf.get('rf_node_stats'):
-                        stats = perf['rf_node_stats']
-                        st.sidebar.write(f"RF trees: {stats['n_trees']}, total nodes: {stats['total_nodes']}, avg nodes/tree: {stats['avg_nodes']}")
-                except Exception as e:
-                    st.sidebar.error(f"Training failed: {e}")
+        try:
+            with st.spinner("Training — this may take some time"):
+                perf = train_and_save(df, model_choice, do_xgb_search, xgb_iter)
+            st.sidebar.success(f"Trained {model_choice} — MAE: {perf['MAE']:.2f}, R²: {perf['R2']:.3f}")
+            if perf.get("rf_stats"):
+                st.sidebar.write("RF stats:", perf["rf_stats"])
+            if perf.get("feat_importance") is not None:
+                st.sidebar.write("Top features:")
+                st.sidebar.dataframe(perf["feat_importance"].head(10).reset_index(drop=True))
+        except Exception as e:
+            st.sidebar.error(f"Training failed: {e}")
 
-    # Tabs
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
-        "📊 Dashboard", "📈 Historical Trends", "🌦 Weather Impact", "🔮 Prediction", "🗺 Regional Analysis"
-    ])
+    # App tabs
+    tabs = st.tabs(["📊 Dashboard", "📈 Historical Trends", "🌦 Weather Impact", "🔮 Prediction", "🗺 Regional Analysis", "⚙️ Model"])
 
-    # Tab 1 Dashboard
-    with tab1:
+    # TAB Dashboard
+    with tabs[0]:
         st.header("Market Overview")
         c1, c2, c3 = st.columns(3)
-        with c1:
-            if 'price' in df.columns:
-                st.metric("Average Price", f"₹{df['price'].mean():.2f}/ton")
-            else:
-                st.metric("Average Price", "N/A")
-        with c2:
-            if 'supply_volume_tons' in df.columns and 'demand_volume_tons' in df.columns:
-                ratio = (df['supply_volume_tons'] / df['demand_volume_tons']).replace([np.inf,-np.inf], np.nan)
-                st.metric("Supply/Demand Ratio", f"{ratio.mean():.2f}")
-            else:
-                st.metric("Supply/Demand Ratio", "N/A")
-        with c3:
-            st.metric("Active Regions", int(df['state'].nunique()) if 'state' in df.columns else "N/A")
-        st.subheader("Latest Entries")
+        if "price" in df.columns:
+            c1.metric("Average Price", f"₹{df['price'].mean():.2f}/ton")
+        else:
+            c1.metric("Average Price", "N/A")
+        if {'supply_volume_tons', 'demand_volume_tons'}.issubset(df.columns):
+            ratio = (df['supply_volume_tons'] / df['demand_volume_tons']).replace([np.inf, -np.inf], np.nan)
+            c2.metric("Supply/Demand Ratio", f"{ratio.mean():.2f}")
+        else:
+            c2.metric("Supply/Demand Ratio", "N/A")
+        c3.metric("Active Regions", int(df['state'].nunique()) if 'state' in df.columns else "N/A")
+        st.subheader("Latest entries")
         if 'date' in df.columns:
             st.dataframe(df.sort_values('date', ascending=False).head(10), use_container_width=True)
         else:
             st.dataframe(df.head(10), use_container_width=True)
 
-    # Tab 2 Historical Trends
-    with tab2:
+    # TAB Historical Trends
+    with tabs[1]:
         st.header("Historical Price Analysis")
         if 'crop_type' in df.columns:
             crop = st.selectbox("Select Crop", df['crop_type'].unique())
@@ -426,10 +434,10 @@ def main():
                 dr = st.date_input("Date Range", value=st.session_state['date_range'],
                                    min_value=df['date'].min().date(), max_value=df['date'].max().date())
                 st.session_state['date_range'] = dr
-                filtered = df[(df['crop_type']==crop) & (df['date'].between(pd.to_datetime(dr[0]), pd.to_datetime(dr[1])))]
+                filtered = df[(df['crop_type'] == crop) & (df['date'].between(pd.to_datetime(dr[0]), pd.to_datetime(dr[1])))]
                 if filtered.empty:
                     st.error("No data for that range — showing full crop history")
-                    filtered = df[df['crop_type']==crop]
+                    filtered = df[df['crop_type'] == crop]
                 fig = px.line(filtered, x='date', y='price', title=f"{crop} Price Trend")
                 st.plotly_chart(fig, use_container_width=True)
             else:
@@ -437,11 +445,10 @@ def main():
         else:
             st.info("No crop_type column present.")
 
-    # Tab 3 Weather Impact
-    with tab3:
-        st.header("Weather Impact (Full analytics)")
-        if set(['rainfall_mm','price']).issubset(df.columns):
-            st.subheader("Price vs Rainfall (scatter + OLS)")
+    # TAB Weather Impact
+    with tabs[2]:
+        st.header("Climate / Weather Impact")
+        if set(['rainfall_mm', 'price']).issubset(df.columns):
             try:
                 fig = px.scatter(df, x='rainfall_mm', y='price', color='crop_type', trendline="ols", title="Price vs Rainfall")
                 st.plotly_chart(fig, use_container_width=True)
@@ -452,8 +459,7 @@ def main():
         else:
             st.info("rainfall_mm or price column missing.")
 
-        if set(['temperature_c','price']).issubset(df.columns):
-            st.subheader("Price vs Temperature (scatter + OLS)")
+        if set(['temperature_c', 'price']).issubset(df.columns):
             try:
                 fig = px.scatter(df, x='temperature_c', y='price', color='crop_type', trendline="ols", title="Price vs Temperature")
                 st.plotly_chart(fig, use_container_width=True)
@@ -464,21 +470,21 @@ def main():
         else:
             st.info("temperature_c or price column missing.")
 
-        st.subheader("Heatmap: Average Price over Rainfall × Temperature bins")
+        st.subheader("Heatmap: Avg Price by Rainfall × Temperature")
         try:
-            if set(['rainfall_mm','temperature_c','price']).issubset(df.columns):
-                df_heat = df[['rainfall_mm','temperature_c','price']].dropna().copy()
+            if set(['rainfall_mm', 'temperature_c', 'price']).issubset(df.columns):
+                df_heat = df[['rainfall_mm', 'temperature_c', 'price']].dropna().copy()
                 if df_heat.shape[0] < 20:
                     st.info("Not enough data for a robust heatmap.")
                 else:
                     df_heat['rain_bin'] = pd.cut(df_heat['rainfall_mm'], bins=10)
                     df_heat['temp_bin'] = pd.cut(df_heat['temperature_c'], bins=10)
-                    heat = df_heat.groupby(['temp_bin','rain_bin'])['price'].mean().reset_index()
+                    heat = df_heat.groupby(['temp_bin', 'rain_bin'])['price'].mean().reset_index()
                     pivot = heat.pivot(index='temp_bin', columns='rain_bin', values='price')
                     pivot.index = pivot.index.astype(str)
                     pivot.columns = pivot.columns.astype(str)
                     fig_heat = px.imshow(pivot.values, x=pivot.columns, y=pivot.index,
-                                         labels={'x':'Rainfall bin','y':'Temperature bin','color':'Avg Price'},
+                                         labels={'x': 'Rainfall bin', 'y': 'Temperature bin', 'color': 'Avg Price'},
                                          title="Average Price by Rainfall & Temperature bins")
                     st.plotly_chart(fig_heat, use_container_width=True)
             else:
@@ -486,118 +492,162 @@ def main():
         except Exception as e:
             st.error(f"Heatmap generation error: {e}")
 
-        # summary stats
-        st.subheader("Weather summary stats")
-        try:
-            if 'rainfall_mm' in df.columns:
-                rmean, rmed, rstd = df['rainfall_mm'].mean(), df['rainfall_mm'].median(), df['rainfall_mm'].std()
-                rcorr = df[['rainfall_mm','price']].dropna().corr().iloc[0,1] if 'price' in df.columns else None
-            else:
-                rmean = rmed = rstd = rcorr = None
-            if 'temperature_c' in df.columns:
-                tmean, tmed, tstd = df['temperature_c'].mean(), df['temperature_c'].median(), df['temperature_c'].std()
-                tcorr = df[['temperature_c','price']].dropna().corr().iloc[0,1] if 'price' in df.columns else None
-            else:
-                tmean = tmed = tstd = tcorr = None
-            c1, c2 = st.columns(2)
-            with c1:
-                st.markdown("**Rainfall (mm)**")
-                st.write(f"Mean: {rmean:.2f}" if rmean is not None else "N/A")
-                st.write(f"Median: {rmed:.2f}" if rmed is not None else "N/A")
-                st.write(f"Std: {rstd:.2f}" if rstd is not None else "N/A")
-                st.write(f"Corr with price: {rcorr:.3f}" if rcorr is not None else "N/A")
-            with c2:
-                st.markdown("**Temperature (°C)**")
-                st.write(f"Mean: {tmean:.2f}" if tmean is not None else "N/A")
-                st.write(f"Median: {tmed:.2f}" if tmed is not None else "N/A")
-                st.write(f"Std: {tstd:.2f}" if tstd is not None else "N/A")
-                st.write(f"Corr with price: {tcorr:.3f}" if tcorr is not None else "N/A")
-        except Exception as e:
-            st.error(f"Weather summary error: {e}")
-
-    # TAB 4: Prediction
-    with tab4:
-        st.header("Price Prediction (auto-filled features)")
-
+    # TAB Prediction
+    with tabs[3]:
+        st.header("Price Prediction")
         if not os.path.exists("model.pkl"):
-            st.warning("No trained model found. Train & save a model in the sidebar.")
+            st.warning("No trained model available. Train a model from the sidebar first.")
         else:
             try:
-                with open("model.pkl","rb") as f:
+                with open("model.pkl", "rb") as f:
                     payload = pickle.load(f)
-                model = payload['model']
-                le_dict = payload['le_dict']
-                feature_cols = payload['feature_cols']
+                pipeline = payload["pipeline"]
+                feature_cols = payload["feature_cols"]
             except Exception as e:
-                st.error(f"Failed to load model: {e}")
-                model = le_dict = feature_cols = None
+                st.error(f"Failed to load saved model: {e}")
+                pipeline = None
 
-            if model is not None:
-                # dependent city dropdown: filter cities by selected state (use actual df values)
+            if pipeline is not None:
+                # dependent city dropdown
                 state_choice = st.selectbox("State", sorted(df['state'].astype(str).unique()))
                 cities_in_state = sorted(df[df['state'].astype(str) == str(state_choice)]['city'].astype(str).unique())
                 if len(cities_in_state) == 0:
-                    st.warning("No cities found for selected state. Choose a different state.")
-                    city_choice = st.text_input("City (type)", "")
+                    st.warning("No cities found for this state; type a city")
+                    city_choice = st.text_input("City", value="")
                 else:
                     city_choice = st.selectbox("City", cities_in_state)
 
                 crop_choice = st.selectbox("Crop Type", sorted(df['crop_type'].astype(str).unique()))
                 season_choice = st.selectbox("Season", sorted(df['season'].astype(str).unique()))
 
-                # prepare encoded row (hidden auto-fill)
-                X_row, raw = prepare_input_row(df, le_dict, feature_cols, state_choice, city_choice, crop_choice, season_choice)
+                with st.expander("Advanced inputs (auto-filled but editable)"):
+                    # auto-filled
+                    X_row_auto, raw_auto = prepare_input_row_for_pipeline(df, state_choice, city_choice, crop_choice, season_choice)
+                    month_val = st.number_input("Month (1-12)", min_value=1, max_value=12, value=int(X_row_auto.loc[0, "month"]))
+                    rainfall_val = st.number_input("Rainfall (mm)", value=float(X_row_auto.loc[0, "rainfall_mm"]))
+                    temp_val = st.number_input("Temperature (°C)", value=float(X_row_auto.loc[0, "temperature_c"]))
+                    supply_val = st.number_input("Supply Volume (tons)", value=float(X_row_auto.loc[0, "supply_volume_tons"]))
+                    demand_val = st.number_input("Demand Volume (tons)", value=float(X_row_auto.loc[0, "demand_volume_tons"]))
+
+                # build input df
+                input_df = pd.DataFrame([{
+                    "state": state_choice,
+                    "city": city_choice,
+                    "crop_type": crop_choice,
+                    "season": season_choice,
+                    "month": int(month_val),
+                    "rainfall_mm": float(rainfall_val),
+                    "temperature_c": float(temp_val),
+                    "supply_volume_tons": float(supply_val),
+                    "demand_volume_tons": float(demand_val)
+                }])
 
                 if st.button("Predict Price"):
                     try:
-                        pred = model.predict(X_row)[0]
-                        st.success(f"Predicted Price: ₹{pred:.2f} / ton")
-                        st.caption(f"Prediction uses historical averages for {city_choice}, {state_choice}.")
+                        pred = pipeline.predict(input_df)[0]
+                        st.success(f"Predicted Price: ₹{pred:.2f}/ton")
+                        # Optional: show local statistics used
+                        st.caption(f"Using averages for {city_choice}, {state_choice} where available.")
                     except Exception as e:
                         st.error(f"Prediction error: {e}")
 
-    # TAB 5: Regional Analysis (map)
-    with tab5:
-        st.header("Regional Analysis (map fallback)")
-        try:
-            india_geojson = "https://raw.githubusercontent.com/geohacker/india/master/state/india_state.geojson"
-            if set(['state','price']).issubset(df.columns):
-                avg_prices = df.groupby(['state','crop_type'])['price'].mean().reset_index()
-                if avg_prices.empty:
-                    st.info("Not enough aggregated data for map.")
-                else:
-                    fig = px.choropleth(
-                        avg_prices,
-                        geojson=india_geojson,
-                        locations="state",
-                        featureidkey="properties.NAME_1",
-                        color="price",
-                        color_continuous_scale=px.colors.sequential.Plasma,
-                        hover_name="state",
-                        animation_frame="crop_type",
-                        scope="asia",
-                        title="State-wise Price Variations"
-                    )
-                    fig.update_geos(fitbounds="locations", visible=False)
-                    st.plotly_chart(fig, use_container_width=True)
+    # TAB Regional Analysis (Nepal provinces if available)
+    with tabs[4]:
+        st.header("Regional Analysis (Province map fallback)")
+        # compute province-level average price
+        if set(["state", "price"]).issubset(df.columns):
+            avg_prices = df.groupby(["state", "crop_type"])["price"].mean().reset_index()
+            # try local Nepal geojson first
+            geojson = None
+            if os.path.exists(NEPAL_GEOJSON_LOCAL):
+                try:
+                    with open(NEPAL_GEOJSON_LOCAL, "r", encoding="utf-8") as f:
+                        geojson = json.load(f)
+                    featureid = "properties.name"
+                except Exception:
+                    geojson = None
+            if geojson is None:
+                # remote Nepal attempt
+                try:
+                    import requests
+                    resp = requests.get(NEPAL_GEOJSON_REMOTE, timeout=6)
+                    geojson = resp.json()
+                    featureid = "properties.name"
+                except Exception:
+                    geojson = None
+
+            if geojson is None:
+                # fallback to India map remote (original)
+                try:
+                    import requests
+                    resp = requests.get(INDIA_GEOJSON_REMOTE, timeout=6)
+                    geojson = resp.json()
+                    featureid = "properties.NAME_1"
+                except Exception:
+                    geojson = None
+
+            if geojson is None:
+                st.info("GeoJSON not available. Showing bar chart instead.")
+                fig = px.bar(avg_prices, x="state", y="price", color="crop_type", title="Avg Price by State (fallback)")
+                st.plotly_chart(fig, use_container_width=True)
             else:
-                st.info("Map requires 'state' and a price column in the dataset.")
-        except Exception as e:
-            st.error(f"Map rendering error: {e}")
+                fig = px.choropleth(avg_prices,
+                                    geojson=geojson,
+                                    locations="state",
+                                    featureidkey=featureid,
+                                    color="price",
+                                    hover_name="state",
+                                    animation_frame="crop_type",
+                                    color_continuous_scale="YlOrBr",
+                                    title="Province-wise Average Price")
+                fig.update_geos(fitbounds="locations", visible=False)
+                st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("state and price columns required for map; showing aggregated table.")
+            st.dataframe(df.groupby("state")["price"].mean().reset_index().sort_values("price", ascending=False))
 
-    # Sidebar: download model/report
+    # TAB Model details
+    with tabs[5]:
+        st.header("Model & Artifacts")
+        if os.path.exists("model.pkl"):
+            with open("model.pkl", "rb") as f:
+                payload = pickle.load(f)
+            st.write("Model choice:", payload.get("model_choice"))
+            st.write("Feature columns:", payload.get("feature_cols"))
+            if payload.get("pipeline") is not None:
+                pipe = payload["pipeline"]
+                try:
+                    reg = pipe.named_steps["regressor"]
+                    if hasattr(reg, "feature_importances_"):
+                        st.subheader("Feature importances (top 15)")
+                        # attempt to reconstruct feature names:
+                        pre = pipe.named_steps["preprocessor"]
+                        try:
+                            cat_cols = payload["cat_cols"]
+                            cfn = pre.named_transformers_['cat'].get_feature_names_out(payload["cat_cols"])
+                            feat_names = list(cfn) + payload["num_cols"]
+                        except Exception:
+                            feat_names = payload.get("feature_cols", [])
+                        try:
+                            importances = reg.feature_importances_
+                            imp_df = pd.DataFrame({"feature": feat_names[:len(importances)], "importance": importances})
+                            st.dataframe(imp_df.sort_values("importance", ascending=False).head(15).reset_index(drop=True))
+                        except Exception:
+                            st.info("Could not extract feature importances.")
+                except Exception:
+                    st.info("No model internals available for inspection.")
+            # allow download
+            with open("model.pkl", "rb") as f:
+                st.download_button("Download model.pkl", f, file_name="model.pkl", mime="application/octet-stream")
+        else:
+            st.info("No trained model saved yet. Train one from the sidebar.")
+
+    # Sidebar: quick report export
     st.sidebar.markdown("---")
-    if os.path.exists("model.pkl"):
-        with open("model.pkl","rb") as f:
-            bin_m = f.read()
-        st.sidebar.download_button("Download trained model (model.pkl)", data=bin_m, file_name="model.pkl", mime="application/octet-stream")
-
-    st.sidebar.header("Reports")
-    if st.sidebar.button("Download summary CSV"):
+    if st.sidebar.button("Download Data Summary CSV"):
         try:
-            report = df.describe().T
-            st.sidebar.download_button("Download summary", data=report.to_csv().encode('utf-8'),
-                                       file_name="market_summary.csv", mime="text/csv")
+            tmp = df.describe().T
+            st.sidebar.download_button("Download summary", data=tmp.to_csv().encode("utf-8"), file_name="market_summary.csv", mime="text/csv")
         except Exception as e:
             st.sidebar.error(f"Failed to prepare report: {e}")
 
