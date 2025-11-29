@@ -355,7 +355,7 @@ def main():
             with st.spinner("Training model..."):
                 try:
                     perf = train_and_save(df, model_choice, do_search)
-                    st.sidebar.success(f"Trained {model_choice} — MAE: {perf['MAE']:.2f}, R²: {perf['R2']:.3f}")
+                    st.sidebar.success("Model trained successfully.")
                 except Exception as e:
                     st.sidebar.error(f"Training failed: {e}")
 
