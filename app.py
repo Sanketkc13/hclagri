@@ -18,9 +18,7 @@ warnings.filterwarnings("ignore")
 st.set_page_config(page_title="AgriPrice Analyzer", layout="wide")
 st.title("Agricultural Market Price Analyzer 🌾")
 
-# -------------------
 # Helpers to detect & normalize columns
-# -------------------
 def detect_price_column(cols):
     for c in cols:
         if 'price' in c.lower():
@@ -102,9 +100,7 @@ def standardize_dataframe(df):
 
     return df, {'price_col': price_col, 'supply_col': supply_col, 'demand_col': demand_col, 'mapping': mapping}
 
-# -------------------
 # Data loader
-# -------------------
 @st.cache_data
 def load_data(uploaded_file=None, default_path="cleaned_dataset.csv"):
     """
@@ -128,9 +124,7 @@ def load_data(uploaded_file=None, default_path="cleaned_dataset.csv"):
         st.error(f"Failed to load data: {e}")
         return pd.DataFrame()
 
-# -------------------
 # Label encoders
-# -------------------
 def fit_label_encoders(df, cat_cols):
     le_dict = {}
     for c in cat_cols:
@@ -140,9 +134,7 @@ def fit_label_encoders(df, cat_cols):
         le_dict[c] = le
     return le_dict
 
-# -------------------
 # Train & save model (fix dtype issue & improved xgboost)
-# -------------------
 def train_and_save(df, model_choice, do_search=False):
     required = {'state','city','crop_type','season','rainfall_mm','temperature_c',
                 'supply_volume_tons','demand_volume_tons','price','date'}
@@ -246,9 +238,7 @@ def train_and_save(df, model_choice, do_search=False):
 
     return {'MAE': float(mae), 'R2': float(r2)}
 
-# -------------------
 # Prepare prediction row (auto-fill)
-# -------------------
 def prepare_input_row(df, le_dict, feature_cols, state, city, crop_type, season):
     df2 = df.copy()
     if 'date' in df2.columns and 'month' not in df2.columns:
@@ -308,18 +298,14 @@ def prepare_input_row(df, le_dict, feature_cols, state, city, crop_type, season)
     X_row = pd.DataFrame([encoded], columns=feature_cols)
     return X_row, raw
 
-# -------------------
 # Model justifications
-# -------------------
 JUST = {
     "Linear Regression": "Fast baseline, easy to interpret. Use for quick checks and comparisons.",
     "Random Forest": "Robust tree ensemble that captures non-linear relationships with little tuning.",
     "XGBoost": "High-performance gradient boosting; tuned defaults provide strong accuracy for tabular data."
 }
 
-# -------------------
 # Main app UI
-# -------------------
 def main():
     st.sidebar.header("Data & Model Controls")
     uploaded = st.sidebar.file_uploader("Upload CSV (or leave to use cleaned_dataset.csv)", type=['csv'])
